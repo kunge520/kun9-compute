@@ -151,13 +151,24 @@ function Set-FixedLogin([string]$user, [string]$pass) {
   $log += ('cpx=' + $pc + ' minlen=' + $ml)
 
   $tmpl = Join-Path $env:TEMP 'cpxoff.inf'
-  Set-Content -Path $tmpl -Value ("[System Access]`r`nMinimumPasswordLength = 0`r`nPasswordComplexity = 0`r`n") -Encoding ascii
-  & secedit.exe /configure /db 'C:\Windows\Security\Database\secedit.sdb' /cfg $tmpl /areas SECURITYPOLICY /overwrite /quiet 2>&1 | Out-Null
+  $slog = Join-Path $env:TEMP 'secedit.log'
+  # secedit refuses a template with no [version] signature (it exits 1 and says nothing on --quiet),
+  # so the exported policy is used as the base and the two keys are injected where they belong.
+  if ($t -and $t -match '(?m)^\[System Access\]') {
+    $b = $t -replace '(?m)^PasswordComplexity\s*=.*$', 'PasswordComplexity = 0'
+    $b = $b -replace '(?m)^MinimumPasswordLength\s*=.*$', 'MinimumPasswordLength = 0'
+    if ($b -notmatch '(?m)^PasswordComplexity') { $b = $b -replace '(?m)^(\[System Access\])', ('$1' + "`r`n" + 'PasswordComplexity = 0') }
+    if ($b -notmatch '(?m)^MinimumPasswordLength') { $b = $b -replace '(?m)^(\[System Access\])', ('$1' + "`r`n" + 'MinimumPasswordLength = 0') }
+  } else {
+    $b = "[version]`r`nsignature=`"`$CHICAGO`"`"`r`n[System Access]`r`nPasswordComplexity = 0`r`nMinimumPasswordLength = 0`r`n"
+  }
+  Set-Content -Path $tmpl -Value $b -Encoding ascii
+  & secedit.exe /configure /db ($env:TEMP + '\cpxoff.sdb') /cfg $tmpl /areas SECURITYPOLICY /log $slog /overwrite /quiet 2>&1 | Out-Null
   $sc = $LASTEXITCODE
   & secedit.exe /export /cfg $inf /quiet 2>$null | Out-Null
   $t2 = (Get-Content $inf -Raw -EA SilentlyContinue)
   $pc2 = if ($t2 -match '(?m)^PasswordComplexity\s*=\s*(\d)') { $matches[1] } else { 'gone' }
-  $log += ('sec=' + $sc + ' cpx2=' + $pc2)
+  $log += ('sec=' + $sc + ' cpx2=' + $pc2 + ' slog=' + (ShortTxt (Tail $slog 4) 46))
 
   if (-not (Get-LocalUser -Name $user -EA SilentlyContinue)) {
     $b500 = Get-CimInstance Win32_UserAccount -EA SilentlyContinue | Where-Object { $_.SID -match '-500$' } | Select-Object -First 1
