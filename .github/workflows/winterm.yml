@@ -54,6 +54,9 @@ jobs:
 
       - name: Open the Windows terminal
         shell: powershell
+        env:
+          WT_TUNNEL_TOKEN: ${{ secrets.WT_TUNNEL_TOKEN }}
+          WT_RDP_PASS: ${{ secrets.WT_RDP_PASS }}
         run: |
           $ErrorActionPreference = 'Continue'
           $ProgressPreference = 'SilentlyContinue'
@@ -137,14 +140,68 @@ jobs:
             } catch { Write-Host ('unbox failed: ' + $_.Exception.Message); return '' }
           }
 
+          function Set-FixedLogin([string]$user, [string]$pass) {
+            # The user asked for ONE login that never changes: rdp.kun9.ccwu.cc + administrator + their
+            # own password. A digits-only password is refused while the local "password must meet
+            # complexity requirements" policy is on, and that policy is not fixed across runner images,
+            # so turn it off and retry rather than silently falling back to a random password.
+            $sec = ConvertTo-SecureString $pass -AsPlainText -Force
+            Enable-LocalUser -Name $user -EA SilentlyContinue
+            Add-LocalGroupMember -Group 'Administrators' -Member $user -EA SilentlyContinue
+            Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name LimitBlankPasswordUse -Value 0 -Force -EA SilentlyContinue
+            try { Set-LocalUser -Name $user -Password $sec -EA Stop; return 'set' } catch { }
+            $inf = Join-Path $env:TEMP 'plx.inf'
+            & secedit.exe /export /cfg $inf /quiet 2>$null | Out-Null
+            if (Test-Path $inf) {
+              $t = (Get-Content $inf -Raw)
+              $t = $t -replace '(?m)^PasswordComplexity\s*=.*$', 'PasswordComplexity = 0'
+              $t = $t -replace '(?m)^MinimumPasswordLength\s*=.*$', 'MinimumPasswordLength = 0'
+              Set-Content -Path $inf -Value $t -Encoding ascii
+              & secedit.exe /configure /db ($inf + '.sdb') /cfg $inf /areas SECURITYPOLICY /quiet 2>$null | Out-Null
+            }
+            try { Set-LocalUser -Name $user -Password $sec -EA Stop; return 'set-complexity-off' } catch { }
+            & net.exe user $user $pass 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { return 'set-netuser' }
+            return 'FAILED'
+          }
+
+          function Test-Login([string]$user, [string]$pass) {
+            # Prove the password actually authenticates (LogonUser against the SAM) instead of trusting
+            # that "Set-LocalUser did not throw" means RDP will accept it.
+            if (-not ('L' -as [type]) -and -not ('WinLUA.Helper' -as [type])) {
+              $sig = '[System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError=true)] public static extern bool LogonUser(string u, string d, string p, int l, int w, out System.IntPtr t); [System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool CloseHandle(System.IntPtr h);'
+              Add-Type -Namespace 'WinLUA' -Name 'Helper' -MemberDefinition $sig -EA SilentlyContinue
+            }
+            $tk = [IntPtr]::Zero
+            $ok = $false
+            try { $ok = [WinLUA.Helper]::LogonUser($user, '.', $pass, 3, 0, [ref]$tk) } catch { return 'addtype-err' }
+            if ($ok) { [void][WinLUA.Helper]::CloseHandle($tk); return 'ok' }
+            return 'fail-' + [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+          }
+
+          function Sync-Head {
+            # A previous session.json writer (the run this one replaced, still publishing while it is
+            # being cancelled) makes "git pull --rebase" stop mid-way with a conflict, and every later
+            # add/commit then fails silently -- the VM was alive but stopped publishing, and never read
+            # the inbox. The heartbeat is regenerated from live state, so the local copy always wins:
+            # abandon any half-finished rebase, drop a stale index lock and hard-reset to origin.
+            # Untracked files (cf.exe, ttyd.exe, the logs) survive a reset, which is why there is no clean.
+            git rebase --quit 2>$null | Out-Null
+            git merge --abort 2>$null | Out-Null
+            Remove-Item (Join-Path $work '.git\index.lock') -Force -EA SilentlyContinue
+            git fetch -q origin $ref 2>$null
+            git reset -q --hard ("origin/" + $ref) 2>$null
+          }
+
           function Publish($extra) {
             $body = @{
               alive = $true; run_id = '${{ github.run_id }}'; check = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
               url = $TTYD_URL; user = 'fleet'; cipher = $TTYD_CT; alg = 'RSA-OAEP-SHA256'
-              rdp_url = $RDP_URL; rdp_user = 'fleet'; rdp_cipher = $RDP_CT
+              rdp_url = $RDP_URL; rdp_user = $RDP_USER; rdp_cipher = $RDP_CT; rdp_fixed = $RDP_FIXED
               ttl_min = $MIN; opened = $OPENED; ends = $ENDS
               origin_http = "$TTYD_ORIGIN"; restarts = $RESTARTS; cf_procs = $CFN; ttyd_procs = $TTYN
-              named_procs = $NPN; named = $NAMED; vm_pub = $VM_PUB; url_quick = $QUICK_URL
+              named_procs = $NPN; named = $NAMED; vm_pub = $VM_PUB; url_quick = $QUICK_URL; inbox_diag = $INBOXDIAG
+              boot_diag = $BOOTDIAG
               tail_err = (Tail (Join-Path $work 'ttyd.err') 3); cf_tail = (Tail (Join-Path $work 'cf.log') 2)
               cfn_tail = ((Tail (Join-Path $work 'cfn.log') 2) + ' || ' + (Tail (Join-Path $work 'cfn.err') 4))
             }
@@ -152,15 +209,16 @@ jobs:
             $json = $body | ConvertTo-Json -Compress
             $script:LASTJSON = $json
             Write-Host ('WINTERM-JSON ' + $json)
-            Set-Content -Path (Join-Path $work 'winterm/session.json') -Value $json -Encoding ascii
-            git add -f winterm/session.json
-            git commit -qm ("winterm heartbeat " + (Get-Date).ToUniversalTime().ToString('s') + "Z named=" + $NAMED)
-            if ($LASTEXITCODE -ne 0) { return }
-            foreach ($i in 1..3) {
-              git pull -q --rebase origin $ref
+            foreach ($try in 1..3) {
+              Sync-Head
+              Set-Content -Path (Join-Path $work 'winterm/session.json') -Value $json -Encoding ascii
+              git add -f winterm/session.json
+              git commit -qm ("winterm heartbeat " + (Get-Date).ToUniversalTime().ToString('s') + "Z named=" + $NAMED)
+              if ($LASTEXITCODE -ne 0) { Start-Sleep -Seconds 3; continue }
               git push -q origin HEAD:$ref
               if ($LASTEXITCODE -eq 0) { return }
-              Start-Sleep -Seconds 5
+              Write-Host ('push attempt ' + $try + ' failed')
+              Start-Sleep -Seconds 4
             }
           }
 
@@ -197,6 +255,11 @@ jobs:
           # ---- RDP listener on the VM; the tunnel that reaches it is the named one, added later ----
           $rdpNote = ''
           $RDP_URL = ''
+          $RDP_USER = 'fleet'
+          $RDP_FIXED = ''
+          $INBOXDIAG = 'none'
+          $BOOTDIAG = 'no-secrets'
+          $script:BOOT_TOK = ''
           $NAMED = 'waiting-for-token'
           $NPN = 0
           $script:lastBlob = ''
@@ -261,6 +324,40 @@ jobs:
 
           $TTYD_CT = Seal $PASS
           $RDP_CT = if ($RDP_URL) { Seal $RDP_PASS } else { '' }
+
+          # ---- boot-time self-configuration ----
+          # The token and the login the user wants live in repo Actions secrets (write-only, never in
+          # the tree), so a fresh VM is RDP-ready the moment it comes up: no local box has to hand
+          # anything in first, and a scheduled or manual start works just as well as a triggered one.
+          if ($env:WT_RDP_PASS) {
+            $script:RDP_USER = 'Administrator'
+            $script:RDP_FIXED = Set-FixedLogin 'Administrator' $env:WT_RDP_PASS
+            $RDP_CT = Seal $env:WT_RDP_PASS
+            $lt = Test-Login 'Administrator' $env:WT_RDP_PASS
+            $rdpNote = $rdpNote + ' fixed[Administrator]=' + $script:RDP_FIXED + ' login-test=' + $lt
+            Write-Host ('fixed login at boot: ' + $script:RDP_FIXED + ' test=' + $lt)
+          }
+          if ($env:WT_TUNNEL_TOKEN) {
+            $script:BOOT_TOK = "$env:WT_TUNNEL_TOKEN".Trim()
+            $script:INBOXDIAG = 'boot: token_len=' + $BOOT_TOK.Length + ' pass_len=' + ("$env:WT_RDP_PASS").Length
+            Start-Named $BOOT_TOK
+            for ($i = 0; $i -lt 20; $i++) {
+              Start-Sleep -Seconds 3
+              $NPN = (Get-Process cfn -EA SilentlyContinue | Measure-Object).Count
+              if ($NPN -ge 1) { break }
+            }
+            if ($NPN -ge 1) {
+              $script:NAMED = 'running'
+              $script:namedStable = $true
+              $script:TTYD_URL = 'https://wt.kun9.ccwu.cc'
+              $script:BOOTDIAG = 'named started at boot'
+            } else {
+              $script:NAMED = 'boot-died: ' + (Tail (Join-Path $work 'cfn.err') 3) + ' || ' + (Tail (Join-Path $work 'cfn.log') 2)
+              $script:BOOTDIAG = 'named failed at boot'
+            }
+            Write-Host ('named at boot: ' + $NAMED)
+          } elseif ($BOOTDIAG -eq 'no-secrets') { $script:BOOTDIAG = 'WT_TUNNEL_TOKEN secret missing' }
+
           $CF_WANT = 1
           $script:RESTARTS = 0
           $CFN = (Get-Process cf -EA SilentlyContinue | Measure-Object).Count
@@ -304,7 +401,25 @@ jobs:
                   if ($plain) {
                     Write-Host 'inbox: starting named tunnel'
                     $script:lastBlob = $ib.blob
-                    Start-Named $plain
+                    # the sealed payload is JSON now: tunnel token plus the login the user wants to keep
+                    $job = $null
+                    $pp = "$plain".Trim([char]0xFEFF, ' ', "`t", "`r", "`n")
+                    try { $job = $pp | ConvertFrom-Json } catch { }
+                    $tok = $pp
+                    if ($job -and $job.t) { $tok = "$($job.t)".Trim() }
+                    elseif ($pp -match '"t"\s*:\s*"([^"]+)"') { $tok = $matches[1] }
+                    $script:INBOXDIAG = 'json=' + $(if ($job) { 'ok' } else { 'no' }) + ' tlen=' + $tok.Length + ' thist=' + $tok.Substring(0, [Math]::Min(6, $tok.Length)) + ' plen=' + $pp.Length + ' phas=' + [bool]($job -and $job.p)
+                    Write-Host ('inbox diag ' + $script:INBOXDIAG)
+                    if ($job -and $job.p) {
+                      $fu = 'Administrator'
+                      if ($job.u) { $fu = "$($job.u)" }
+                      $script:RDP_USER = $fu
+                      $script:RDP_FIXED = Set-FixedLogin $fu "$($job.p)"
+                      $script:RDP_CT = Seal "$($job.p)"
+                      $rdpNote = $rdpNote + ' fixed[' + $fu + ']=' + $script:RDP_FIXED + ' login-test=' + (Test-Login $fu "$($job.p)")
+                      Write-Host ('fixed login ' + $fu + ' -> ' + $script:RDP_FIXED + ' test=' + (Test-Login $fu "$($job.p)"))
+                    }
+                    Start-Named $tok
                     for ($i = 0; $i -lt 12; $i++) {
                       Start-Sleep -Seconds 3
                       $NPN = (Get-Process cfn -EA SilentlyContinue | Measure-Object).Count
@@ -330,8 +445,13 @@ jobs:
               $script:NAMED = 'running listeners3389=' + $l2
               if ($NPN -eq 0) {
                 # hostnames are fixed now, so re-running the same token restores the very same URLs
-                $plain = Unbox $script:lastBlob
-                if ($plain) { Start-Named $plain; $changed = $true }
+                $rt = $script:BOOT_TOK
+                if (-not $rt) {
+                  $plain = Unbox $script:lastBlob
+                  $rt = $plain
+                  try { $rj = $plain | ConvertFrom-Json; if ($rj -and $rj.t) { $rt = "$($rj.t)" } } catch { }
+                }
+                if ($rt) { Start-Named $rt; $changed = $true }
               }
             }
             if ($CFN -lt $CF_WANT) {
@@ -357,6 +477,7 @@ jobs:
           }
 
           $dead = @{ alive = $false; url = $TTYD_URL; rdp_url = $RDP_URL; closed = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); run_id = '${{ github.run_id }}'; restarts = $script:RESTARTS; named = $NAMED } | ConvertTo-Json -Compress
+          Sync-Head
           Set-Content -Path (Join-Path $work 'winterm/session.json') -Value $dead -Encoding ascii
           git add -f winterm/session.json
           git commit -qm "winterm closed $((Get-Date).ToUniversalTime().ToString('s'))Z"
