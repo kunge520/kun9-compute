@@ -1,19 +1,23 @@
 name: winterm
 
-# Windows version of the browser terminal, on the PUBLIC repo on purpose: standard
-# GitHub-hosted runners are free for public repositories for every OS (docs: "The use of standard
-# GitHub-hosted runners is free: In public repositories"), and the per-OS multipliers (Windows 2x,
-# macOS 10x) only apply to PRIVATE repo minutes. In kun9-fleet a 6 h Windows session would eat
-# 720 of the 2000 monthly minutes; here it costs nothing.
+# Windows browser terminal + RDP inside a GitHub-hosted VM, on the PUBLIC repo on purpose:
+# standard GitHub-hosted runners are free for public repositories for every OS (docs: "The use of
+# standard GitHub-hosted runners is free: In public repositories"), and the 2x/10x multipliers only
+# apply to PRIVATE repo minutes -- so a 6 h Windows session costs nothing here but would eat 720
+# of the 2000 monthly minutes in kun9-fleet.
 #
-# Because this repo is world-readable, the ttyd password is NEVER written in the clear: the runner
-# encrypts it with winterm/pub.xml (RSA-2048, OAEP-SHA256) and only this box, which holds
-# %LOCALAPPDATA%\gh_tools\wt_priv.xml, can read it back. The tunnel URL is public but useless
-# without the password -- ttyd answers 401 (verified on the Linux session).
+# Because this repo is world-readable the passwords are NEVER written in the clear: the runner
+# encrypts them with winterm/pub.xml (RSA-2048, OAEP-SHA256) and only the box holding
+# %LOCALAPPDATA%\gh_tools\wt_priv.xml can read them back.
 #
-# Same hard-won rules as webterm: publish the session as a COMMIT (the job-log endpoint returns
-# BlobNotFound while the step is running), and start the daemons and sleep in the SAME step,
-# because a step boundary is where Actions reaps orphan processes.
+# Hard-won rules encoded here:
+#  - publish state as a COMMIT, not a log line: the job-log endpoint returns BlobNotFound while
+#    the step runs, so logs can only be read after the session is already over.
+#  - start the daemons and sleep in the SAME step: a step boundary is where Actions reaps orphans.
+#  - cloudflared's URL does not reach shell-redirected stdout on Windows; use --logfile.
+#  - git identity must be set before ANY commit, including the failure path.
+#  - ttyd.win32.exe was observed Dying mid-session (Cloudflare then answers 502 forever), so the
+#    wait is a supervising loop that restarts it and republishes, instead of a blind sleep.
 
 on:
   push:
@@ -37,102 +41,182 @@ jobs:
           $ErrorActionPreference = 'Continue'
           $ProgressPreference = 'SilentlyContinue'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          $work = $PWD.Path
+          git config user.name winterm
+          git config user.email winterm@users.noreply.github.com
+
           $tok = (Get-Content trigger.winterm -Raw) -split '\s+'
           $MIN = 0; [void][int]::TryParse($tok[0], [ref]$MIN)
           if ($MIN -lt 5) { $MIN = 5 }
           if ($MIN -gt 350) { $MIN = 350 }
           $SECS = $MIN * 60
 
-          $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
-          $rb = New-Object byte[] 24
-          $rng.GetBytes($rb)
-          $PASS = (([Convert]::ToBase64String($rb)) -replace '[^a-zA-Z0-9]', '').Substring(0, 16)
-
-          Invoke-WebRequest -Uri 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' -OutFile cf.exe
-          $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/tsl0922/ttyd/releases/latest'
-          $ttydUrl = ($rel.assets | Where-Object { $_.name -like 'ttyd.win*' } | Select-Object -First 1).browser_download_url
-          Invoke-WebRequest -Uri $ttydUrl -OutFile ttyd.exe
-          Write-Host ("binaries ttyd=" + $ttydUrl + "  cf=" + (Get-Item cf.exe).Length + "B  ttyd=" + (Get-Item ttyd.exe).Length + "B")
-
-          $work = $PWD.Path
-          # Set the identity BEFORE anything can commit: the first Windows run reached the failure
-          # path, and git refused with "Author identity unknown" because user.name was only
-          # configured on the success path -- so no diagnostics ever landed in the repo.
-          git config user.name winterm
-          git config user.email winterm@users.noreply.github.com
-
-          Start-Process -FilePath (Join-Path $work 'ttyd.exe') -ArgumentList @('-p', '7681', '-W', '-c', "fleet:$PASS", 'cmd') -RedirectStandardOutput (Join-Path $work "ttyd.out") -RedirectStandardError (Join-Path $work "ttyd.err") -NoNewWindow
-          Start-Sleep -Seconds 5
-          # Probe the origin first, so a dead ttyd is distinguishable from a dead tunnel.
-          $orig = try { (Invoke-WebRequest -Uri 'http://127.0.0.1:7681/' -UseBasicParsing -TimeoutSec 8).StatusCode } catch { if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 'err:' + $_.Exception.Message } }
-          Write-Host ("origin 127.0.0.1:7681 -> " + $orig + "  ttyd_pid=" + ((Get-Process ttyd -EA SilentlyContinue).Id -join ',') + "  ttyd_size=" + (Get-Item ttyd.exe).Length)
-          Get-Content (Join-Path $work 'ttyd.err') -Tail 10 -EA SilentlyContinue | ForEach-Object { Write-Host ("ttyd.err: " + $_) }
-
-          # http2 keeps the connector on tcp/443; QUIC's udp/7844 is often dropped in Azure.
-          # --logfile, not shell redirection: the first Windows run left the redirected stdout file
-          # empty for 90 s while cloudflared had already registered the tunnel, so the URL was
-          # unreachable by parsing. cloudflared's own log file is what actually carries it.
-          Start-Process -FilePath (Join-Path $work 'cf.exe') -ArgumentList @('tunnel', '--url', 'http://127.0.0.1:7681', '--no-autoupdate', '--protocol', 'http2', '--logfile', (Join-Path $work 'cf.log')) -RedirectStandardOutput (Join-Path $work "cf.stdout") -RedirectStandardError (Join-Path $work "cf.stderr") -NoNewWindow
-
-          $U = ''
-          $cfTxt = ''
-          for ($i = 0; $i -lt 60; $i++) {
-            $cfTxt = ''
-            if (Test-Path cf.log) { $cfTxt = (Get-Content cf.log -Raw -EA SilentlyContinue) }
-            if ($cfTxt) {
-              $m = [regex]::Match($cfTxt, 'https://[a-z0-9-]+\.trycloudflare\.com')
-              if ($m.Success) { $U = $m.Value; break }
+          function New-Pass {
+            $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+            $b = New-Object byte[] 24
+            $rng.GetBytes($b)
+            return (([Convert]::ToBase64String($b)) -replace '[^a-zA-Z0-9]', '').Substring(0, 16)
+          }
+          function Seal([string]$plain) {
+            $r = New-Object Security.Cryptography.RSACng
+            $r.FromXmlString((Get-Content winterm/pub.xml -Raw))
+            return [Convert]::ToBase64String($r.Encrypt([Text.Encoding]::UTF8.GetBytes($plain), [Security.Cryptography.RSAEncryptionPadding]::OaepSHA256))
+          }
+          function OriginCode([int]$port) {
+            try { return [int](Invoke-WebRequest -Uri ('http://127.0.0.1:' + $port + '/') -UseBasicParsing -TimeoutSec 6).StatusCode }
+            catch { if ($_.Exception.Response) { return [int]$_.Exception.Response.StatusCode } else { return 0 } }
+          }
+          function Tail([string]$f, [int]$n) {
+            if (Test-Path $f) { return (((Get-Content $f -Tail $n -EA SilentlyContinue) -join ' | ') -replace "`r", '') }
+            return ''
+          }
+          function Start-Ttyd {
+            Start-Process -FilePath (Join-Path $work 'ttyd.exe') -ArgumentList @('-p', '7681', '-W', '-c', ('fleet:' + $PASS), 'cmd') -RedirectStandardOutput (Join-Path $work 'ttyd.out') -RedirectStandardError (Join-Path $work 'ttyd.err') -NoNewWindow
+          }
+          function Start-Cf([string]$target, [string]$log) {
+            # No --name: with --url this is a quick tunnel and --name belongs to registered ones.
+            Start-Process -FilePath (Join-Path $work 'cf.exe') -ArgumentList @('tunnel', '--url', $target, '--no-autoupdate', '--protocol', 'http2', '--logfile', $log) -RedirectStandardOutput ($log + '.stdout') -RedirectStandardError ($log + '.stderr') -NoNewWindow
+          }
+          function Wait-CfUrl([string]$log, [int]$tries) {
+            for ($i = 0; $i -lt $tries; $i++) {
+              $t = ''
+              if (Test-Path $log) { $t = (Get-Content $log -Raw -EA SilentlyContinue) }
+              if ($t) {
+                $m = [regex]::Match($t, 'https://[a-z0-9-]+\.trycloudflare\.com')
+                if ($m.Success) { return $m.Value }
+              }
+              Start-Sleep -Seconds 2
             }
-            if ($i -eq 14 -or $i -eq 44) { Write-Host ("still waiting, cf.log bytes=" + $cfTxt.Length + " cf.stderr tail:") ; Get-Content (Join-Path $work 'cf.stderr') -Tail 6 -EA SilentlyContinue | ForEach-Object { Write-Host ("  " + $_) } }
-            Start-Sleep -Seconds 2
+            return ''
+          }
+          function Publish($extra) {
+            $body = @{
+              alive = $true; run_id = '${{ github.run_id }}'; check = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+              url = $TTYD_URL; user = 'fleet'; cipher = $TTYD_CT; alg = 'RSA-OAEP-SHA256'
+              rdp_url = $RDP_URL; rdp_user = 'fleet'; rdp_cipher = $RDP_CT
+              ttl_min = $MIN; opened = $OPENED; ends = $ENDS
+              origin_http = "$TTYD_ORIGIN"; restarts = $RESTARTS; cf_procs = $CFN; ttyd_procs = $TTYN
+              tail_err = (Tail (Join-Path $work 'ttyd.err') 3)
+            }
+            foreach ($k in $extra.Keys) { $body[$k] = $extra[$k] }
+            $json = $body | ConvertTo-Json -Compress
+            $script:LASTJSON = $json
+            Write-Host ('WINTERM-JSON ' + $json)
+            Set-Content -Path (Join-Path $work 'winterm/session.json') -Value $json -Encoding ascii
+            git add -f winterm/session.json
+            git commit -qm ("winterm heartbeat " + (Get-Date).ToUniversalTime().ToString('s') + "Z restarts=" + $RESTARTS)
+            if ($LASTEXITCODE -ne 0) { return }
+            foreach ($i in 1..3) {
+              git pull -q --rebase origin ${{ github.ref_name }}
+              git push -q origin HEAD:${{ github.ref_name }}
+              if ($LASTEXITCODE -eq 0) { return }
+              Start-Sleep -Seconds 5
+            }
           }
 
-          if (-not $U) {
+          Invoke-WebRequest -Uri 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' -OutFile (Join-Path $work 'cf.exe')
+          $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/tsl0922/ttyd/releases/latest'
+          $ttydUrl = ($rel.assets | Where-Object { $_.name -like 'ttyd.win*' } | Select-Object -First 1).browser_download_url
+          Invoke-WebRequest -Uri $ttydUrl -OutFile (Join-Path $work 'ttyd.exe')
+          Write-Host ('binaries cf=' + (Get-Item (Join-Path $work 'cf.exe')).Length + 'B ttyd=' + (Get-Item (Join-Path $work 'ttyd.exe')).Length + 'B src=' + $ttydUrl)
+
+          # ---- terminal credentials ----
+          $PASS = New-Pass
+          $RDP_PASS = New-Pass
+          $OPENED = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+          $ENDS = (Get-Date).ToUniversalTime().AddSeconds($SECS).ToString('yyyy-MM-ddTHH:mm:ssZ')
+
+          # ---- browser terminal ----
+          Start-Ttyd
+          Start-Sleep -Seconds 5
+          $TTYD_ORIGIN = OriginCode 7681
+          Write-Host ('ttyd origin -> ' + $TTYD_ORIGIN + '  pids=' + ((Get-Process ttyd -EA SilentlyContinue).Id -join ','))
+          Write-Host ('ttyd.err tail: ' + (Tail (Join-Path $work 'ttyd.err') 8))
+          Start-Cf 'http://127.0.0.1:7681' (Join-Path $work 'cf.log')
+          $TTYD_URL = Wait-CfUrl (Join-Path $work 'cf.log') 60
+          if (-not $TTYD_URL) {
             Write-Host '=== no tunnel URL, dumping diagnostics ==='
-            foreach ($f in 'cf.log', 'cf.stderr', 'cf.stdout', 'ttyd.out', 'ttyd.err') {
-              Write-Host ("---- " + $f)
-              if (Test-Path $f) { Get-Content $f -Tail 25 | ForEach-Object { Write-Host $_ } }
-            }
-            $diag = @{ alive = $false; error = 'no tunnel url'; origin_http = "$orig"; cf_log = ((Get-Content cf.log -Raw -EA SilentlyContinue) -split "`n" | Select-Object -Last 30) -join ' | '; cf_err = ((Get-Content cf.stderr -Raw -EA SilentlyContinue) -split "`n" | Select-Object -Last 20) -join ' | '; ttyd_err = (Get-Content ttyd.err -Raw -EA SilentlyContinue); run_id = '${{ github.run_id }}' } | ConvertTo-Json -Compress
-            Set-Content -Path winterm-diag.json -Value $diag -Encoding ascii
-            git add -f winterm-diag.json
-            git commit -qm "winterm diag $((Get-Date).ToUniversalTime().ToString('s'))Z"
-            git push -q origin HEAD:${{ github.ref_name }}
+            foreach ($f in 'cf.log', 'cf.log.stderr', 'ttyd.err') { Write-Host ('---- ' + $f); Get-Content (Join-Path $work $f) -Tail 25 -EA SilentlyContinue | ForEach-Object { Write-Host $_ } }
+            $diag = @{ alive = $false; error = 'no tunnel url'; origin_http = "$TTYD_ORIGIN"; cf_err = (Tail (Join-Path $work 'cf.log.stderr') 20); ttyd_err = (Tail (Join-Path $work 'ttyd.err') 20); run_id = '${{ github.run_id }}' } | ConvertTo-Json -Compress
+            Set-Content -Path (Join-Path $work 'winterm-diag.json') -Value $diag -Encoding ascii
+            git add -f winterm-diag.json; git commit -qm "winterm diag $((Get-Date).ToUniversalTime().ToString('s'))Z"; git push -q origin HEAD:${{ github.ref_name }}
             exit 0
           }
 
-          $r = New-Object Security.Cryptography.RSACng
-          $r.FromXmlString((Get-Content winterm/pub.xml -Raw))
-          $CT = [Convert]::ToBase64String($r.Encrypt([Text.Encoding]::UTF8.GetBytes($PASS), [Security.Cryptography.RSAEncryptionPadding]::OaepSHA256))
+          # ---- RDP over its own quick tunnel (a second hostname) ----
+          $rdpNote = ''
+          try {
+            Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -Force
+            Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0 -Force -EA SilentlyContinue
+            Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -EA SilentlyContinue
+            $sec = ConvertTo-SecureString $RDP_PASS -AsPlainText -Force
+            $existing = Get-LocalUser -Name 'fleet' -EA SilentlyContinue
+            if ($existing) { Set-LocalUser -Name 'fleet' -Password $sec -EA SilentlyContinue } else { New-LocalUser -Name 'fleet' -Password $sec -AccountNeverExpires -PasswordNeverExpires -UserPasswordRequired $true | Out-Null }
+            Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'fleet' -EA SilentlyContinue
+            Add-LocalGroupMember -Group 'Administrators' -Member 'fleet' -EA SilentlyContinue
+            Start-Service TermService -EA SilentlyContinue
+            $listen = (Get-NetTCPConnection -LocalPort 3389 -State Listen -EA SilentlyContinue | Measure-Object).Count
+            Write-Host ('rdp setup: TermService=' + (Get-Service TermService -EA SilentlyContinue).Status + ' listeners on 3389=' + $listen)
+            if ($listen -ge 1) {
+              Start-Cf 'tcp://127.0.0.1:3389' (Join-Path $work 'cf2.log')
+              $RDP_URL = Wait-CfUrl (Join-Path $work 'cf2.log') 45
+            } else { $rdpNote = 'no 3389 listener' }
+          } catch { $rdpNote = 'rdp enable failed: ' + $_.Exception.Message }
+          Write-Host ('rdp_url=' + $RDP_URL + '  note=' + $rdpNote)
 
-          $now = (Get-Date).ToUniversalTime()
-          $os = Get-CimInstance Win32_OperatingSystem
-          $body = @{
-            url = $U; user = 'fleet'; cipher = $CT; alg = 'RSA-OAEP-SHA256'; key = 'winterm/pub.xml'
-            ttl_min = $MIN; opened = $now.ToString('yyyy-MM-ddTHH:mm:ssZ'); ends = $now.AddSeconds($SECS).ToString('yyyy-MM-ddTHH:mm:ssZ')
-            origin_http = "$orig"; alive = $true; run_id = '${{ github.run_id }}'
-            host = $os.Caption; cores = [Environment]::ProcessorCount
-            mem = ('{0:N1}G' -f ($os.TotalVisibleMemorySize / 1MB))
-            free_disk = (Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" | ForEach-Object { '{0:N0}G' -f ($_.FreeSpace / 1GB) })
-          } | ConvertTo-Json -Compress
-          Write-Host ('WINTERM-JSON ' + $body)
+          $TTYD_CT = Seal $PASS
+          $RDP_CT = if ($RDP_URL) { Seal $RDP_PASS } else { '' }
+          # How many connectors SHOULD be running: compare against this, or a session without RDP
+          # would be re-dialed (and get a brand new hostname) every 20 seconds forever.
+          $CF_WANT = if ($RDP_URL) { 2 } else { 1 }
+          $script:RESTARTS = 0
+          $CFN = 0; $TTYN = 0
+          Publish @{ note = $rdpNote }
 
-          New-Item -ItemType Directory -Force -Path winterm | Out-Null
-          Set-Content -Path winterm/session.json -Value $body -Encoding ascii
-          git add -f winterm/session.json
-          git commit -qm "winterm session $($now.ToString('s'))Z"
-          foreach ($i in 1..3) {
-            git pull -q --rebase origin ${{ github.ref_name }}
-            git push -q origin HEAD:${{ github.ref_name }}
-            if ($LASTEXITCODE -eq 0) { Write-Host published; break }
-            Start-Sleep -Seconds 5
+          # ---- supervise: keep ttyd AND both tunnels alive for the whole TTL ----
+          $until = (Get-Date).ToUniversalTime().AddSeconds($SECS)
+          $lastPublish = Get-Date
+          while ((Get-Date).ToUniversalTime() -lt $until) {
+            Start-Sleep -Seconds 20
+            $TTYN = (Get-Process ttyd -EA SilentlyContinue | Measure-Object).Count
+            $CFN = (Get-Process cf -EA SilentlyContinue | Measure-Object).Count
+            $code = OriginCode 7681
+            $changed = $false
+            if ($code -eq 0 -or $TTYN -eq 0) {
+              $script:RESTARTS = $RESTARTS + 1
+              Write-Host ('ttyd dead (origin=' + $code + ' procs=' + $TTYN + '), restarting #' + $script:RESTARTS)
+              Get-Process ttyd -EA SilentlyContinue | Stop-Process -Force
+              Start-Ttyd
+              Start-Sleep -Seconds 5
+              $code = OriginCode 7681
+              $changed = $true
+            }
+            if ($CFN -lt $CF_WANT) {
+              # a quick-tunnel hostname is bound to its process: if cloudflared died the old URL is
+              # permanently 530/502, so re-dial and republish the new hostname.
+              Write-Host ('cloudflared procs=' + $CFN + ', re-dialing')
+              Get-Process cf -EA SilentlyContinue | Stop-Process -Force
+              Start-Sleep -Seconds 2
+              Start-Cf 'http://127.0.0.1:7681' (Join-Path $work 'cf.log')
+              $nu = Wait-CfUrl (Join-Path $work 'cf.log') 30
+              if ($nu) { $script:TTYD_URL = $nu }
+              $l2 = (Get-Process cf -EA SilentlyContinue | Measure-Object).Count
+              if ($RDP_URL -and $l2 -lt 2) {
+                Start-Cf 'tcp://127.0.0.1:3389' (Join-Path $work 'cf2.log')
+                $n2 = Wait-CfUrl (Join-Path $work 'cf2.log') 30
+                if ($n2) { $script:RDP_URL = $n2; $script:RDP_CT = Seal $RDP_PASS }
+              }
+              $changed = $true
+            }
+            $TTYD_ORIGIN = $code
+            if ($changed -or ((Get-Date) - $lastPublish).TotalMinutes -ge 20) {
+              Publish @{ note = $rdpNote }
+              $lastPublish = Get-Date
+            }
           }
 
-          # Hold the VM open in THIS step: ttyd and cloudflared die at a step boundary.
-          Start-Sleep -Seconds $SECS
-
-          $dead = @{ alive = $false; url = $U; closed = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); run_id = '${{ github.run_id }}' } | ConvertTo-Json -Compress
-          Set-Content -Path winterm/session.json -Value $dead -Encoding ascii
+          $dead = @{ alive = $false; url = $TTYD_URL; rdp_url = $RDP_URL; closed = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); run_id = '${{ github.run_id }}'; restarts = $script:RESTARTS } | ConvertTo-Json -Compress
+          Set-Content -Path (Join-Path $work 'winterm/session.json') -Value $dead -Encoding ascii
           git add -f winterm/session.json
           git commit -qm "winterm closed $((Get-Date).ToUniversalTime().ToString('s'))Z"
           git push -q origin HEAD:${{ github.ref_name }}
