@@ -1,0 +1,124 @@
+name: winterm
+
+# Windows version of the browser terminal, on the PUBLIC repo on purpose: standard
+# GitHub-hosted runners are free for public repositories for every OS (docs: "The use of standard
+# GitHub-hosted runners is free: In public repositories"), and the per-OS multipliers (Windows 2x,
+# macOS 10x) only apply to PRIVATE repo minutes. In kun9-fleet a 6 h Windows session would eat
+# 720 of the 2000 monthly minutes; here it costs nothing.
+#
+# Because this repo is world-readable, the ttyd password is NEVER written in the clear: the runner
+# encrypts it with winterm/pub.xml (RSA-2048, OAEP-SHA256) and only this box, which holds
+# %LOCALAPPDATA%\gh_tools\wt_priv.xml, can read it back. The tunnel URL is public but useless
+# without the password -- ttyd answers 401 (verified on the Linux session).
+#
+# Same hard-won rules as webterm: publish the session as a COMMIT (the job-log endpoint returns
+# BlobNotFound while the step is running), and start the daemons and sleep in the SAME step,
+# because a step boundary is where Actions reaps orphan processes.
+
+on:
+  push:
+    paths:
+      - trigger.winterm
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  winterm:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Open the Windows terminal
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $ProgressPreference = 'SilentlyContinue'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          $tok = (Get-Content trigger.winterm -Raw) -split '\s+'
+          $MIN = 0; [void][int]::TryParse($tok[0], [ref]$MIN)
+          if ($MIN -lt 5) { $MIN = 5 }
+          if ($MIN -gt 350) { $MIN = 350 }
+          $SECS = $MIN * 60
+
+          $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+          $rb = New-Object byte[] 24
+          $rng.GetBytes($rb)
+          $PASS = (([Convert]::ToBase64String($rb)) -replace '[^a-zA-Z0-9]', '').Substring(0, 16)
+
+          Invoke-WebRequest -Uri 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' -OutFile cf.exe
+          $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/tsl0922/ttyd/releases/latest'
+          $ttydUrl = ($rel.assets | Where-Object { $_.name -like 'ttyd.win*' } | Select-Object -First 1).browser_download_url
+          Invoke-WebRequest -Uri $ttydUrl -OutFile ttyd.exe
+          Write-Host ("binaries ttyd=" + $ttydUrl + "  cf=" + (Get-Item cf.exe).Length + "B  ttyd=" + (Get-Item ttyd.exe).Length + "B")
+
+          $work = $PWD.Path
+          Start-Process -FilePath (Join-Path $work 'ttyd.exe') -ArgumentList @('-p', '7681', '-W', '-c', "fleet:$PASS", 'cmd') -RedirectStandardOutput (Join-Path $work "ttyd.out") -RedirectStandardError (Join-Path $work "ttyd.err") -NoNewWindow
+          Start-Sleep -Seconds 4
+          # http2 keeps the connector on tcp/443; QUIC's udp/7844 is often dropped in Azure.
+          Start-Process -FilePath (Join-Path $work 'cf.exe') -ArgumentList @('tunnel', '--url', 'http://127.0.0.1:7681', '--no-autoupdate', '--protocol', 'http2') -RedirectStandardOutput (Join-Path $work "cf.log") -RedirectStandardError (Join-Path $work "cf.err") -NoNewWindow
+
+          $U = ''
+          for ($i = 0; $i -lt 45; $i++) {
+            $logTxt = ''
+            if (Test-Path cf.log) { $logTxt = Get-Content cf.log -Raw }
+            $m = [regex]::Match($logTxt, 'https://[a-z0-9-]+\.trycloudflare\.com')
+            if ($m.Success) { $U = $m.Value; break }
+            Start-Sleep -Seconds 2
+          }
+          $orig = try { (Invoke-WebRequest -Uri 'http://127.0.0.1:7681/' -UseBasicParsing -TimeoutSec 8).StatusCode } catch { $_.Exception.Response.StatusCode.value__ }
+
+          if (-not $U) {
+            Write-Host '=== no tunnel URL, dumping diagnostics ==='
+            foreach ($f in 'cf.log', 'cf.err', 'ttyd.out', 'ttyd.err') {
+              Write-Host ("---- " + $f)
+              if (Test-Path $f) { Get-Content $f -Tail 25 | ForEach-Object { Write-Host $_ } }
+            }
+            $diag = @{ alive = $false; error = 'no tunnel url'; origin_http = "$orig"; cf_err = (Get-Content cf.err -Raw -ErrorAction SilentlyContinue); ttyd_err = (Get-Content ttyd.err -Raw -ErrorAction SilentlyContinue); run_id = '${{ github.run_id }}' } | ConvertTo-Json -Compress
+            Set-Content -Path winterm-diag.json -Value $diag -Encoding ascii
+            git add -f winterm-diag.json
+            git commit -qm "winterm diag $((Get-Date).ToUniversalTime().ToString('s'))Z"
+            git push -q origin HEAD:${{ github.ref_name }}
+            exit 0
+          }
+
+          $r = New-Object Security.Cryptography.RSACng
+          $r.FromXmlString((Get-Content winterm/pub.xml -Raw))
+          $CT = [Convert]::ToBase64String($r.Encrypt([Text.Encoding]::UTF8.GetBytes($PASS), [Security.Cryptography.RSAEncryptionPadding]::OaepSHA256))
+
+          $now = (Get-Date).ToUniversalTime()
+          $os = Get-CimInstance Win32_OperatingSystem
+          $body = @{
+            url = $U; user = 'fleet'; cipher = $CT; alg = 'RSA-OAEP-SHA256'; key = 'winterm/pub.xml'
+            ttl_min = $MIN; opened = $now.ToString('yyyy-MM-ddTHH:mm:ssZ'); ends = $now.AddSeconds($SECS).ToString('yyyy-MM-ddTHH:mm:ssZ')
+            origin_http = "$orig"; alive = $true; run_id = '${{ github.run_id }}'
+            host = $os.Caption; cores = [Environment]::ProcessorCount
+            mem = ('{0:N1}G' -f ($os.TotalVisibleMemorySize / 1MB))
+            free_disk = (Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" | ForEach-Object { '{0:N0}G' -f ($_.FreeSpace / 1GB) })
+          } | ConvertTo-Json -Compress
+          Write-Host ('WINTERM-JSON ' + $body)
+
+          git config user.name winterm
+          git config user.email winterm@users.noreply.github.com
+          New-Item -ItemType Directory -Force -Path winterm | Out-Null
+          Set-Content -Path winterm/session.json -Value $body -Encoding ascii
+          git add -f winterm/session.json
+          git commit -qm "winterm session $($now.ToString('s'))Z"
+          foreach ($i in 1..3) {
+            git pull -q --rebase origin ${{ github.ref_name }}
+            git push -q origin HEAD:${{ github.ref_name }}
+            if ($LASTEXITCODE -eq 0) { Write-Host published; break }
+            Start-Sleep -Seconds 5
+          }
+
+          # Hold the VM open in THIS step: ttyd and cloudflared die at a step boundary.
+          Start-Sleep -Seconds $SECS
+
+          $dead = @{ alive = $false; url = $U; closed = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); run_id = '${{ github.run_id }}' } | ConvertTo-Json -Compress
+          Set-Content -Path winterm/session.json -Value $dead -Encoding ascii
+          git add -f winterm/session.json
+          git commit -qm "winterm closed $((Get-Date).ToUniversalTime().ToString('s'))Z"
+          git push -q origin HEAD:${{ github.ref_name }}
+          exit 0
