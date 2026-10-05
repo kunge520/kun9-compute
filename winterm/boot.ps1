@@ -406,12 +406,38 @@ if ($env:WT_TUNNEL_TOKEN) {
   Write-Host ('named at boot: ' + $NAMED)
 } elseif ($BOOTDIAG -eq 'no-secrets') { $script:BOOTDIAG = 'WT_TUNNEL_TOKEN secret missing' }
 
+function RdpDiag {
+  # A session that logs on fine and is then killed 30-60 s later is the expired RDP licensing grace
+  # period on a Windows *client* SKU. Nothing in the X.224 handshake shows it; the licensing and
+  # LocalSessionManager event logs and the grace-period deadline do, so they ride along in the note.
+  $s = ''
+  try {
+    $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-TerminalServices-Licensing' } -MaxEvents 3 -EA SilentlyContinue)
+    $s += ' lic=' + (($ev | ForEach-Object { $_.Id + '@' + $_.TimeCreated.ToString('HHmm') }) -join ',')
+  } catch { $s += ' lic=err' }
+  try {
+    $ev2 = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-TerminalServices-LocalSessionManager' } -MaxEvents 8 -EA SilentlyContinue)
+    $s += ' lsm=' + (($ev2 | ForEach-Object { $_.Id + '@' + $_.TimeCreated.ToString('HHmm') }) -join ',')
+  } catch { $s += ' lsm=err' }
+  $q = (& query.exe user 2>&1) -join ' '
+  $s += ' q=' + (ShortTxt $q 96)
+  try {
+    $g = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\RCM\GracePeriod' -EA SilentlyContinue
+    if ($g) {
+      $b = $g.'L$RTMTIMEBOMB'
+      if ($b -is [byte[]]) { $b = [Text.Encoding]::Unicode.GetString($b) }
+      $s += ' gp=' + (ShortTxt "$b" 26)
+    } else { $s += ' gp=none' }
+  } catch { $s += ' gp=deny' }
+  return $s
+}
+
 $CF_WANT = 1
 $script:RESTARTS = 0
 $CFN = (Get-Process cf -EA SilentlyContinue | Measure-Object).Count
 $TTYN = (Get-Process ttyd -EA SilentlyContinue | Measure-Object).Count
 $NPN = (Get-Process cfn -EA SilentlyContinue | Measure-Object).Count
-Publish @{ note = $rdpNote }
+Publish @{ note = ($rdpNote + (RdpDiag)) }
 
 # ---- supervise: keep ttyd + quick tunnel alive, and pick up the named-tunnel token ----
 $until = (Get-Date).ToUniversalTime().AddSeconds($SECS)
@@ -519,7 +545,7 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
 
   $TTYD_ORIGIN = $code
   if ($changed -or ((Get-Date) - $lastPublish).TotalSeconds -ge 60) {
-    Publish @{ note = $rdpNote }
+    Publish @{ note = ($rdpNote + (RdpDiag)) }
     $lastPublish = Get-Date
   }
 }
