@@ -21,6 +21,9 @@ name: winterm
 #  - a self_hosted Access app with ZERO policies does not gate the hostname (the edge forwards
 #    straight to the connector), and this API version rejects every service_token policy shape
 #    ("invalid service_token rule"), so RDP is guarded only by the ephemeral Windows password.
+#  - an X.224 Connection Request must be the full 19 bytes (LI 0x0e + RDP_NEG_REQ with 4-byte
+#    requestedProtocols). The 15-byte short form makes Windows reset the socket, which looks exactly
+#    like "the tunnel carries nothing" -- it cost a whole detour through named tunnels to rule out.
 #  - git identity must be set before ANY commit, including the failure path.
 #  - ttyd.win32.exe was observed Dying mid-session (Cloudflare then answers 502 forever), so the
 #    wait is a supervising loop that restarts it and republishes, instead of a blind sleep.
@@ -236,7 +239,9 @@ jobs:
               if ($ar.AsyncWaitHandle.WaitOne(5000)) {
                 $tc.EndConnect($ar)
                 $ns = $tc.GetStream(); $ns.ReadTimeout = 6000
-                $cra = [byte[]]@(3, 0, 0, 15, 10, 224, 0, 0, 0, 0, 0, 1, 0, 8, 0)
+                # 19-byte X.224 CR with a complete RDP_NEG_REQ. A truncated one (the 15-byte form)
+                # makes Windows reset the socket, which looks exactly like a dead origin.
+                $cra = [byte[]]@(3, 0, 0, 19, 14, 224, 0, 0, 0, 0, 0, 0, 0, 1, 0, 8, 0, 1, 0, 0, 0)
                 $ns.Write($cra, 0, $cra.Length)
                 $rb = New-Object byte[] 32
                 $n = $ns.Read($rb, 0, 32)
