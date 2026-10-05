@@ -318,7 +318,14 @@ try {
   Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name SecurityLayer -Value 0 -Force -EA SilentlyContinue
   # a WinStation can be listening while switched off, which shows up the same way
   Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name fEnableWinStation -Value 1 -Force -EA SilentlyContinue
-  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fSingleSessionPerUser -Value 0 -Force -EA SilentlyContinue
+  # This is a Windows *client* SKU: console session + one remote session is the hard ceiling, and a
+  # disconnected remote session still holds its slot. With one session per user the next connect rejoins
+  # the session that is already there instead of opening a second one the server then tears down (that
+  # looked like "the client could not establish the transport connection" right after logon).
+  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fSingleSessionPerUser -Value 1 -Force -EA SilentlyContinue
+  # ...and an abandoned session has to give the slot back, or nobody can get in again until the VM dies.
+  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name MaxDisconnectionTime -Value 300000 -Force -EA SilentlyContinue
+  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name fOverrideMaxDisconnectionTime -Value 1 -Force -EA SilentlyContinue
   Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -EA SilentlyContinue
   $sec = ConvertTo-SecureString $RDP_PASS -AsPlainText -Force
   $existing = Get-LocalUser -Name 'fleet' -EA SilentlyContinue
@@ -407,28 +414,25 @@ if ($env:WT_TUNNEL_TOKEN) {
 } elseif ($BOOTDIAG -eq 'no-secrets') { $script:BOOTDIAG = 'WT_TUNNEL_TOKEN secret missing' }
 
 function RdpDiag {
-  # A session that logs on fine and is then killed 30-60 s later is the expired RDP licensing grace
-  # period on a Windows *client* SKU. Nothing in the X.224 handshake shows it; the licensing and
-  # LocalSessionManager event logs and the grace-period deadline do, so they ride along in the note.
+  # The client only ever sees "the session died seconds after logon", and nothing in the X.224 handshake
+  # says why. The server-side logs, the session table and the live WinStation limits do, so they ride
+  # along in the heartbeat note instead of needing a shell on the box.
   $s = ''
-  try {
-    $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-TerminalServices-Licensing' } -MaxEvents 3 -EA SilentlyContinue)
-    $s += ' lic=' + (($ev | ForEach-Object { $_.Id + '@' + $_.TimeCreated.ToString('HHmm') }) -join ',')
-  } catch { $s += ' lic=err' }
-  try {
-    $ev2 = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-TerminalServices-LocalSessionManager' } -MaxEvents 8 -EA SilentlyContinue)
-    $s += ' lsm=' + (($ev2 | ForEach-Object { $_.Id + '@' + $_.TimeCreated.ToString('HHmm') }) -join ',')
-  } catch { $s += ' lsm=err' }
+  foreach ($p in @(@('lsm', 'Microsoft-Windows-TerminalServices-LocalSessionManager/Operational', 6),
+                   @('core', 'Microsoft-Windows-TerminalServices-RdpCoreTS/Operational', 6))) {
+    try {
+      $ev = @(Get-WinEvent -LogName $p[1] -MaxEvents $p[2] -EA SilentlyContinue)
+      $s += ' ' + $p[0] + '=' + $(if ($ev.Count) { (($ev | ForEach-Object { $_.Id + '@' + $_.TimeCreated.ToString('HHmm') }) -join ',') } else { 'none' })
+    } catch { $s += ' ' + $p[0] + '=err' }
+  }
   $q = (& query.exe user 2>&1) -join ' '
-  $s += ' q=' + (ShortTxt $q 96)
+  $s += ' q=' + (ShortTxt $q 120)
   try {
-    $g = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\RCM\GracePeriod' -EA SilentlyContinue
-    if ($g) {
-      $b = $g.'L$RTMTIMEBOMB'
-      if ($b -is [byte[]]) { $b = [Text.Encoding]::Unicode.GetString($b) }
-      $s += ' gp=' + (ShortTxt "$b" 26)
-    } else { $s += ' gp=none' }
-  } catch { $s += ' gp=deny' }
+    $t = Get-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -EA SilentlyContinue
+    $w = Get-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -EA SilentlyContinue
+    $s += ' sspu=' + $t.fSingleSessionPerUser + ' mdt=' + $w.MaxDisconnectionTime + 'o' + $w.fOverrideMaxDisconnectionTime +
+          ' sec=' + $w.SecurityLayer + '/' + $w.UserAuthentication
+  } catch { $s += ' reg=err' }
   return $s
 }
 
