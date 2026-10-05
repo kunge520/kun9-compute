@@ -1,0 +1,59 @@
+task        US-vantage network baseline
+run         37315017585 attempt=1 sha=bf16a3141d
+trigger     push by kunge520
+started     2026-10-05T13:12:28Z
+
+== who / where ==
+utc         2026-10-05 13:12:28
+runner      Linux 6.17.0-1022-azure x86_64  nproc=4
+  "ip": "172.203.253.172"
+  "city": "Dulles Town Center"
+  "region": "Virginia"
+  "country": "US"
+  "org": "AS8075 Microsoft Corporation"
+  "timezone": "America/New_York"
+
+== per-request timing (seconds; remote_ip is what we actually reached) ==
+TARGET                 URL                                                        RESULT
+-- Cloudflare, our own stuff
+relay-list             https://ch.kun9.ccwu.cc/                                   dns=0.248108 tcp=0.256080 tls=0.278869 ttfb=0.402764 total=0.402799 0KB 1KB/s http=200 ip=104.21.37.23
+relay-master           https://ch.kun9.ccwu.cc/mxd/rig_agent.ps1                  dns=0.000533 tcp=0.008261 tls=0.030357 ttfb=0.228794 total=0.236143 73KB 311KB/s http=200 ip=172.67.203.71
+relay-report           https://ch.kun9.ccwu.cc/mxd/rig_watchdog.txt               dns=0.000536 tcp=0.007457 tls=0.029708 ttfb=0.133728 total=0.133758 0KB 4KB/s http=200 ip=172.67.203.71
+telemetry-root         https://tl.kun9.ccwu.cc/                                   dns=0.084484 tcp=0.092453 tls=0.114820 ttfb=0.245481 total=0.245517 0KB 1KB/s http=200 ip=172.67.203.71
+cf-api-noauth          https://api.cloudflare.com/client/v4/user/tokens/verify    dns=0.006848 tcp=0.009375 tls=0.029912 ttfb=0.144012 total=0.144056 0KB 0KB/s http=400 ip=104.19.192.174
+cf-cdnjs-32kb          https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js dns=0.002144 tcp=0.004496 tls=0.025148 ttfb=0.041115 total=0.043217 85KB 1977KB/s http=200 ip=104.17.24.14
+cf-dash                https://dash.cloudflare.com/                               dns=0.008210 tcp=0.010364 tls=0.031227 ttfb=0.038941 total=0.038974 4KB 126KB/s http=403 ip=104.17.110.184
+
+-- GitHub
+gh-api                 https://api.github.com/meta                                dns=0.002322 tcp=0.004709 tls=0.025290 ttfb=0.030070 total=0.038650 151KB 3906KB/s http=200 ip=140.82.113.6
+gh-raw-public          https://raw.githubusercontent.com/github/gitignore/main/PowerShell.gitignore dns=0.002083 tcp=0.003364 tls=0.023335 ttfb=0.087584 total=0.087618 0KB 0KB/s http=404 ip=185.199.108.133
+
+-- Google / YouTube (the harvest target)
+google-204             https://www.google.com/generate_204                        dns=0.002801 tcp=0.005248 tls=0.025042 ttfb=0.028137 total=0.028152 0KB 0KB/s http=204 ip=142.251.154.119
+gstatic-204            https://www.gstatic.com/generate_204                       dns=0.002056 tcp=0.004671 tls=0.024660 ttfb=0.027385 total=0.027401 0KB 0KB/s http=204 ip=172.253.62.94
+google-accts           https://accounts.google.com/                               dns=0.002303 tcp=0.005606 tls=0.025428 ttfb=0.106987 total=0.134056 895KB 6681KB/s http=200 ip=64.233.180.84
+youtube-home           https://www.youtube.com/                                   dns=0.002577 tcp=0.005365 tls=0.026023 ttfb=0.112913 total=0.212247 867KB 4088KB/s http=200 ip=142.251.156.4
+yt-music               https://music.youtube.com/                                 dns=0.005545 tcp=0.008189 tls=0.028169 ttfb=0.073730 total=0.369025 1KB 5KB/s http=200 ip=142.251.179.93
+yt-thumb               https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg           dns=0.002738 tcp=0.005383 tls=0.025457 ttfb=0.028988 total=0.029337 20KB 699KB/s http=200 ip=172.253.139.119
+yt-timedtext           https://www.youtube.com/timedtext                          dns=0.000591 tcp=0.003259 tls=0.023301 ttfb=0.097601 total=0.173233 795KB 4594KB/s http=200 ip=142.251.155.4
+googlevideo-204        https://redirector.googlevideo.com/generate_204            dns=0.012966 tcp=0.015826 tls=0.036568 ttfb=0.039533 total=0.039549 0KB 0KB/s http=204 ip=142.251.179.101
+
+-- free tiers we have never measured from anywhere
+neon                   https://console.neon.tech/                                 dns=0.009277 tcp=0.011517 tls=0.032245 ttfb=0.158848 total=0.159079 17KB 112KB/s http=200 ip=104.18.23.51
+turso                  https://turso.tech/                                        dns=0.019956 tcp=0.023283 tls=0.043689 ttfb=0.090330 total=0.095296 149KB 1565KB/s http=200 ip=76.76.21.21
+mongodb-atlas          https://cloud.mongodb.com/                                 dns=0.004507 tcp=0.009004 tls=0.048029 ttfb=0.066009 total=0.066055 10KB 163KB/s http=200 ip=34.194.131.15
+
+== bulk throughput (the number that decides whether an edge route is usable) ==
+cf-speed-5MB           got 5120KB of 5MB  48622 KB/s  http=200
+google-dl-2MB          got 367KB of ~2MB  6260 KB/s  http=200
+github-relay-75        got 73KB of 75KB  385 KB/s  http=200
+
+== transport facts ==
+ipv6 curl   : curl: (6) Could not resolve host: api.github.com
+curl        : curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0 OpenSSL/3.0.13 zlib/1.3 brotli/1.1.0 zstd/1.5.5 libidn2/2.3.7 libpsl/0.21.2 (+libidn2/2.3.7) libssh/0.10.6/openssl/zlib nghttp2/1.59.0 librtmp/2.3 OpenLDAP/2.6.10
+openssl     : OpenSSL 3.0.13 30 Jan 2024 (Library: OpenSSL 3.0.13 30 Jan 2024)
+h2 used     : 2
+dns servers : 127.0.0.53 
+default rt  : 1.1.1.1 via 10.1.0.1 dev eth0 src 10.1.1.250 uid 1001 
+
+task_exit   0
