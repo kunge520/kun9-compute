@@ -15,6 +15,12 @@ name: winterm
 #    the step runs, so logs can only be read after the session is already over.
 #  - start the daemons and sleep in the SAME step: a step boundary is where Actions reaps orphans.
 #  - cloudflared's URL does not reach shell-redirected stdout on Windows; use --logfile.
+#  - cloudflared global flags (--logfile, --log-level, --protocol) must come BEFORE `run`: after it
+#    the process exits instantly with "Incorrect Usage", which from the outside looks exactly like
+#    a bad tunnel token. --log-level is a root flag and is not accepted by `tunnel` either.
+#  - a self_hosted Access app with ZERO policies does not gate the hostname (the edge forwards
+#    straight to the connector), and this API version rejects every service_token policy shape
+#    ("invalid service_token rule"), so RDP is guarded only by the ephemeral Windows password.
 #  - git identity must be set before ANY commit, including the failure path.
 #  - ttyd.win32.exe was observed Dying mid-session (Cloudflare then answers 502 forever), so the
 #    wait is a supervising loop that restarts it and republishes, instead of a blind sleep.
@@ -88,16 +94,21 @@ jobs:
           }
           function Start-Named([string]$token) {
             # Its own exe name, so Get-Process cf keeps counting only the quick tunnels.
+            # --logfile/--protocol are flags of the PARENT `tunnel` command: after `run` cloudflared
+            # exits with "flag provided but not defined", which looks identical to a bad token.
+            $token = "$token".Trim()
             Copy-Item (Join-Path $work 'cf.exe') (Join-Path $work 'cfn.exe') -Force -EA SilentlyContinue
-            Start-Process -FilePath (Join-Path $work 'cfn.exe') -ArgumentList @('tunnel', '--no-autoupdate', '--protocol', 'http2', 'run', '--token', $token, '--logfile', (Join-Path $work 'cfn.log')) -RedirectStandardOutput (Join-Path $work 'cfn.out') -RedirectStandardError (Join-Path $work 'cfn.err') -NoNewWindow
+            Start-Process -FilePath (Join-Path $work 'cfn.exe') -ArgumentList @('tunnel', '--no-autoupdate', '--protocol', 'http2', '--logfile', (Join-Path $work 'cfn.log'), 'run', '--token', $token) -RedirectStandardOutput (Join-Path $work 'cfn.out') -RedirectStandardError (Join-Path $work 'cfn.err') -NoNewWindow
           }
           function Wait-CfUrl([string]$log, [int]$tries) {
             for ($i = 0; $i -lt $tries; $i++) {
               $t = ''
               if (Test-Path $log) { $t = (Get-Content $log -Raw -EA SilentlyContinue) }
               if ($t) {
-                $m = [regex]::Match($t, 'https://[a-z0-9-]+\.trycloudflare\.com')
-                if ($m.Success) { return $m.Value }
+                # last match, not first: cf.log is append-only, so after a re-dial the dead
+                # hostname is still sitting at the top of the file.
+                $m = [regex]::Matches($t, 'https://[a-z0-9-]+\.trycloudflare\.com')
+                if ($m.Count -gt 0) { return $m[$m.Count - 1].Value }
               }
               Start-Sleep -Seconds 2
             }
@@ -130,8 +141,9 @@ jobs:
               rdp_url = $RDP_URL; rdp_user = 'fleet'; rdp_cipher = $RDP_CT
               ttl_min = $MIN; opened = $OPENED; ends = $ENDS
               origin_http = "$TTYD_ORIGIN"; restarts = $RESTARTS; cf_procs = $CFN; ttyd_procs = $TTYN
-              named_procs = $NPN; named = $NAMED; vm_pub = $VM_PUB
+              named_procs = $NPN; named = $NAMED; vm_pub = $VM_PUB; url_quick = $QUICK_URL
               tail_err = (Tail (Join-Path $work 'ttyd.err') 3); cf_tail = (Tail (Join-Path $work 'cf.log') 2)
+              cfn_tail = ((Tail (Join-Path $work 'cfn.log') 2) + ' || ' + (Tail (Join-Path $work 'cfn.err') 4))
             }
             foreach ($k in $extra.Keys) { $body[$k] = $extra[$k] }
             $json = $body | ConvertTo-Json -Compress
@@ -169,6 +181,7 @@ jobs:
           Write-Host ('ttyd.err tail: ' + (Tail (Join-Path $work 'ttyd.err') 8))
           Start-Cf 'http://127.0.0.1:7681' (Join-Path $work 'cf.log')
           $TTYD_URL = Wait-CfUrl (Join-Path $work 'cf.log') 60
+          $QUICK_URL = $TTYD_URL
           if (-not $TTYD_URL) {
             Write-Host '=== no tunnel URL, dumping diagnostics ==='
             foreach ($f in 'cf.log', 'cf.log.stderr', 'ttyd.err') { Write-Host ('---- ' + $f); Get-Content (Join-Path $work $f) -Tail 25 -EA SilentlyContinue | ForEach-Object { Write-Host $_ } }
@@ -208,7 +221,9 @@ jobs:
           $RDP_CT = if ($RDP_URL) { Seal $RDP_PASS } else { '' }
           $CF_WANT = 1
           $script:RESTARTS = 0
-          $CFN = 0; $TTYN = 0
+          $CFN = (Get-Process cf -EA SilentlyContinue | Measure-Object).Count
+          $TTYN = (Get-Process ttyd -EA SilentlyContinue | Measure-Object).Count
+          $NPN = (Get-Process cfn -EA SilentlyContinue | Measure-Object).Count
           Publish @{ note = $rdpNote }
 
           # ---- supervise: keep ttyd + quick tunnel alive, and pick up the named-tunnel token ----
@@ -257,9 +272,10 @@ jobs:
                       $script:NAMED = 'running'
                       $script:namedStable = $true
                       $script:TTYD_URL = 'https://wt.kun9.ccwu.cc'
-                      Get-Process cf -EA SilentlyContinue | Stop-Process -Force
+                      # the quick tunnel is deliberately left running: if the named one dies later the
+                      # terminal still has a live URL (a rotating one) instead of going dark.
                     } else {
-                      $script:NAMED = 'token-received-but-process-died: ' + (Tail (Join-Path $work 'cfn.err') 3)
+                      $script:NAMED = 'process-died: ' + (Tail (Join-Path $work 'cfn.err') 3) + ' || ' + (Tail (Join-Path $work 'cfn.log') 2)
                     }
                     $changed = $true
                   }
@@ -275,19 +291,24 @@ jobs:
                 $plain = Unbox $script:lastBlob
                 if ($plain) { Start-Named $plain; $changed = $true }
               }
-            } elseif ($CFN -lt $CF_WANT) {
+            }
+            if ($CFN -lt $CF_WANT) {
               # a quick-tunnel hostname dies with its process, so re-dial and republish the new one
               Write-Host ('cloudflared procs=' + $CFN + ', re-dialing')
               Get-Process cf -EA SilentlyContinue | Stop-Process -Force
               Start-Sleep -Seconds 2
+              Remove-Item (Join-Path $work 'cf.log') -Force -EA SilentlyContinue
               Start-Cf 'http://127.0.0.1:7681' (Join-Path $work 'cf.log')
               $nu = Wait-CfUrl (Join-Path $work 'cf.log') 30
-              if ($nu) { $script:TTYD_URL = $nu }
+              if ($nu) {
+                $script:QUICK_URL = $nu
+                if (-not $namedStable) { $script:TTYD_URL = $nu }
+              }
               $changed = $true
             }
 
             $TTYD_ORIGIN = $code
-            if ($changed -or ((Get-Date) - $lastPublish).TotalMinutes -ge 20) {
+            if ($changed -or ((Get-Date) - $lastPublish).TotalSeconds -ge 60) {
               Publish @{ note = $rdpNote }
               $lastPublish = Get-Date
             }
