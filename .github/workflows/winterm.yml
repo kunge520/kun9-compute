@@ -18,6 +18,14 @@ name: winterm
 #  - git identity must be set before ANY commit, including the failure path.
 #  - ttyd.win32.exe was observed Dying mid-session (Cloudflare then answers 502 forever), so the
 #    wait is a supervising loop that restarts it and republishes, instead of a blind sleep.
+#  - QUICK TUNNELS CARRY HTTP ONLY. Measured locally: a tcp:// quick tunnel registers a hostname and
+#    the edge even answers the websocket upgrade, but no bytes ever reach the origin. So RDP (3389)
+#    goes through a NAMED tunnel (wt/rdp.kun9.ccwu.cc), which also stops the hostname rotating.
+#  - the PAT behind this repo has no `secrets` scope, so the tunnel token cannot be an Actions
+#    secret. It is handed in through the repo instead: the VM makes an ephemeral RSA key and
+#    publishes ONLY the public half; the local client then pushes winterm/inbox.json with the token
+#    encrypted to it (AES-256-CBC inside, because a 242-char token is over RSA-OAEP's ~190B cap).
+#    Anyone without repo write access cannot put anything in that box the VM would accept.
 
 on:
   push:
@@ -42,6 +50,7 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
           $work = $PWD.Path
+          $ref = '${{ github.ref_name }}'
           git config user.name winterm
           git config user.email winterm@users.noreply.github.com
 
@@ -77,6 +86,11 @@ jobs:
             # No --name: with --url this is a quick tunnel and --name belongs to registered ones.
             Start-Process -FilePath (Join-Path $work 'cf.exe') -ArgumentList @('tunnel', '--url', $target, '--no-autoupdate', '--protocol', 'http2', '--logfile', $log) -RedirectStandardOutput ($log + '.stdout') -RedirectStandardError ($log + '.stderr') -NoNewWindow
           }
+          function Start-Named([string]$token) {
+            # Its own exe name, so Get-Process cf keeps counting only the quick tunnels.
+            Copy-Item (Join-Path $work 'cf.exe') (Join-Path $work 'cfn.exe') -Force -EA SilentlyContinue
+            Start-Process -FilePath (Join-Path $work 'cfn.exe') -ArgumentList @('tunnel', '--no-autoupdate', '--protocol', 'http2', 'run', '--token', $token, '--logfile', (Join-Path $work 'cfn.log')) -RedirectStandardOutput (Join-Path $work 'cfn.out') -RedirectStandardError (Join-Path $work 'cfn.err') -NoNewWindow
+          }
           function Wait-CfUrl([string]$log, [int]$tries) {
             for ($i = 0; $i -lt $tries; $i++) {
               $t = ''
@@ -89,6 +103,26 @@ jobs:
             }
             return ''
           }
+
+          # ---- ephemeral key the local client uses to hand us the tunnel token ----
+          $vmk = New-Object Security.Cryptography.RSACng 2048
+          $VM_PUB = $vmk.ToXmlString($false)
+          function Unbox($obj) {
+            try {
+              $raw = if ($obj -is [string]) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($obj)) } else { $obj | ConvertTo-Json -Compress }
+              $e = $raw | ConvertFrom-Json
+              $aesKey = $vmk.Decrypt([Convert]::FromBase64String($e.k), [Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
+              $ct = [Convert]::FromBase64String($e.d)
+              $aes = [Security.Cryptography.Aes]::Create()
+              $aes.Key = $aesKey
+              $aes.IV = [Convert]::FromBase64String($e.iv)
+              $aes.Mode = [Security.Cryptography.CipherMode]::CBC
+              $aes.Padding = [Security.Cryptography.PaddingMode]::PKCS7
+              $pt = $aes.CreateDecryptor().TransformFinalBlock($ct, 0, $ct.Length)
+              return [Text.Encoding]::UTF8.GetString($pt)
+            } catch { Write-Host ('unbox failed: ' + $_.Exception.Message); return '' }
+          }
+
           function Publish($extra) {
             $body = @{
               alive = $true; run_id = '${{ github.run_id }}'; check = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -96,6 +130,7 @@ jobs:
               rdp_url = $RDP_URL; rdp_user = 'fleet'; rdp_cipher = $RDP_CT
               ttl_min = $MIN; opened = $OPENED; ends = $ENDS
               origin_http = "$TTYD_ORIGIN"; restarts = $RESTARTS; cf_procs = $CFN; ttyd_procs = $TTYN
+              named_procs = $NPN; named = $NAMED; vm_pub = $VM_PUB
               tail_err = (Tail (Join-Path $work 'ttyd.err') 3); cf_tail = (Tail (Join-Path $work 'cf.log') 2)
             }
             foreach ($k in $extra.Keys) { $body[$k] = $extra[$k] }
@@ -104,11 +139,11 @@ jobs:
             Write-Host ('WINTERM-JSON ' + $json)
             Set-Content -Path (Join-Path $work 'winterm/session.json') -Value $json -Encoding ascii
             git add -f winterm/session.json
-            git commit -qm ("winterm heartbeat " + (Get-Date).ToUniversalTime().ToString('s') + "Z restarts=" + $RESTARTS)
+            git commit -qm ("winterm heartbeat " + (Get-Date).ToUniversalTime().ToString('s') + "Z named=" + $NAMED)
             if ($LASTEXITCODE -ne 0) { return }
             foreach ($i in 1..3) {
-              git pull -q --rebase origin ${{ github.ref_name }}
-              git push -q origin HEAD:${{ github.ref_name }}
+              git pull -q --rebase origin $ref
+              git push -q origin HEAD:$ref
               if ($LASTEXITCODE -eq 0) { return }
               Start-Sleep -Seconds 5
             }
@@ -126,7 +161,7 @@ jobs:
           $OPENED = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
           $ENDS = (Get-Date).ToUniversalTime().AddSeconds($SECS).ToString('yyyy-MM-ddTHH:mm:ssZ')
 
-          # ---- browser terminal ----
+          # ---- browser terminal over an HTTP quick tunnel: works with no setup at all ----
           Start-Ttyd
           Start-Sleep -Seconds 5
           $TTYD_ORIGIN = OriginCode 7681
@@ -139,12 +174,17 @@ jobs:
             foreach ($f in 'cf.log', 'cf.log.stderr', 'ttyd.err') { Write-Host ('---- ' + $f); Get-Content (Join-Path $work $f) -Tail 25 -EA SilentlyContinue | ForEach-Object { Write-Host $_ } }
             $diag = @{ alive = $false; error = 'no tunnel url'; origin_http = "$TTYD_ORIGIN"; cf_err = (Tail (Join-Path $work 'cf.log.stderr') 20); ttyd_err = (Tail (Join-Path $work 'ttyd.err') 20); run_id = '${{ github.run_id }}' } | ConvertTo-Json -Compress
             Set-Content -Path (Join-Path $work 'winterm-diag.json') -Value $diag -Encoding ascii
-            git add -f winterm-diag.json; git commit -qm "winterm diag $((Get-Date).ToUniversalTime().ToString('s'))Z"; git push -q origin HEAD:${{ github.ref_name }}
+            git add -f winterm-diag.json; git commit -qm "winterm diag $((Get-Date).ToUniversalTime().ToString('s'))Z"; git push -q origin HEAD:$ref
             exit 0
           }
 
-          # ---- RDP over its own quick tunnel (a second hostname) ----
+          # ---- RDP listener on the VM; the tunnel that reaches it is the named one, added later ----
           $rdpNote = ''
+          $RDP_URL = ''
+          $NAMED = 'waiting-for-token'
+          $NPN = 0
+          $script:lastBlob = ''
+          $namedStable = $false
           try {
             Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -Force
             Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0 -Force -EA SilentlyContinue
@@ -157,34 +197,31 @@ jobs:
             Add-LocalGroupMember -Group 'Administrators' -Member 'fleet' -EA SilentlyContinue
             Set-Service TermService -StartupType Manual -EA SilentlyContinue
             Start-Service TermService -EA SilentlyContinue
+            Start-Sleep -Seconds 3
             $listen = (Get-NetTCPConnection -LocalPort 3389 -State Listen -EA SilentlyContinue | Measure-Object).Count
             $rdpNote = 'TermService=' + (Get-Service TermService -EA SilentlyContinue).Status + ' listeners3389=' + $listen + ' user=' + [bool](Get-LocalUser -Name 'fleet' -EA SilentlyContinue)
-            Write-Host ('rdp setup: ' + $rdpNote)
-            if ($listen -ge 1) {
-              Start-Cf 'tcp://127.0.0.1:3389' (Join-Path $work 'cf2.log')
-              $RDP_URL = Wait-CfUrl (Join-Path $work 'cf2.log') 45
-            } else { $rdpNote = 'no 3389 listener; ' + $rdpNote }
+            if ($listen -ge 1) { $script:RDP_URL = 'https://rdp.kun9.ccwu.cc' } else { $rdpNote = 'NO-3389-LISTENER; ' + $rdpNote }
           } catch { $rdpNote = 'rdp enable failed: ' + $_.Exception.Message }
-          Write-Host ('rdp_url=' + $RDP_URL + '  note=' + $rdpNote)
+          Write-Host ('rdp setup: ' + $rdpNote)
 
           $TTYD_CT = Seal $PASS
           $RDP_CT = if ($RDP_URL) { Seal $RDP_PASS } else { '' }
-          # How many connectors SHOULD be running: compare against this, or a session without RDP
-          # would be re-dialed (and get a brand new hostname) every 20 seconds forever.
-          $CF_WANT = if ($RDP_URL) { 2 } else { 1 }
+          $CF_WANT = 1
           $script:RESTARTS = 0
           $CFN = 0; $TTYN = 0
           Publish @{ note = $rdpNote }
 
-          # ---- supervise: keep ttyd AND both tunnels alive for the whole TTL ----
+          # ---- supervise: keep ttyd + quick tunnel alive, and pick up the named-tunnel token ----
           $until = (Get-Date).ToUniversalTime().AddSeconds($SECS)
           $lastPublish = Get-Date
           while ((Get-Date).ToUniversalTime() -lt $until) {
             Start-Sleep -Seconds 20
             $TTYN = (Get-Process ttyd -EA SilentlyContinue | Measure-Object).Count
             $CFN = (Get-Process cf -EA SilentlyContinue | Measure-Object).Count
+            $NPN = (Get-Process cfn -EA SilentlyContinue | Measure-Object).Count
             $code = OriginCode 7681
             $changed = $false
+
             if ($code -eq 0 -or $TTYN -eq 0) {
               $script:RESTARTS = $RESTARTS + 1
               Write-Host ('ttyd dead (origin=' + $code + ' procs=' + $TTYN + '), restarting #' + $script:RESTARTS)
@@ -194,23 +231,61 @@ jobs:
               $code = OriginCode 7681
               $changed = $true
             }
-            if ($CFN -lt $CF_WANT) {
-              # a quick-tunnel hostname is bound to its process: if cloudflared died the old URL is
-              # permanently 530/502, so re-dial and republish the new hostname.
+
+            # hand-in box: client pushes winterm/inbox.json encrypted to $VM_PUB, scoped to our run id
+            if (-not $namedStable) {
+              git fetch -q origin $ref 2>$null
+              $raw = ''
+              foreach ($r in @('FETCH_HEAD', ('origin/' + $ref))) {
+                $raw = (& git show ($r + ':winterm/inbox.json') 2>$null) | Out-String
+                if ($raw.Trim()) { break }
+              }
+              if ($raw.Trim()) {
+                try { $ib = $raw | ConvertFrom-Json } catch { $ib = $null }
+                if ($ib -and "$($ib.run_id)" -eq '${{ github.run_id }}') {
+                  $plain = Unbox $ib.blob
+                  if ($plain) {
+                    Write-Host 'inbox: starting named tunnel'
+                    $script:lastBlob = $ib.blob
+                    Start-Named $plain
+                    for ($i = 0; $i -lt 12; $i++) {
+                      Start-Sleep -Seconds 3
+                      $NPN = (Get-Process cfn -EA SilentlyContinue | Measure-Object).Count
+                      if ($NPN -ge 1) { break }
+                    }
+                    if ($NPN -ge 1) {
+                      $script:NAMED = 'running'
+                      $script:namedStable = $true
+                      $script:TTYD_URL = 'https://wt.kun9.ccwu.cc'
+                      Get-Process cf -EA SilentlyContinue | Stop-Process -Force
+                    } else {
+                      $script:NAMED = 'token-received-but-process-died: ' + (Tail (Join-Path $work 'cfn.err') 3)
+                    }
+                    $changed = $true
+                  }
+                }
+              }
+            }
+
+            if ($namedStable) {
+              $l2 = (Get-NetTCPConnection -LocalPort 3389 -State Listen -EA SilentlyContinue | Measure-Object).Count
+              $script:NAMED = 'running listeners3389=' + $l2
+              if ($NPN -eq 0) {
+                # hostnames are fixed now, so re-running the same token restores the very same URLs
+                $plain = Unbox $script:lastBlob
+                if ($plain) { Start-Named $plain; $changed = $true }
+              }
+            } elseif ($CFN -lt $CF_WANT) {
+              # a quick-tunnel hostname dies with its process, so re-dial and republish the new one
               Write-Host ('cloudflared procs=' + $CFN + ', re-dialing')
               Get-Process cf -EA SilentlyContinue | Stop-Process -Force
               Start-Sleep -Seconds 2
               Start-Cf 'http://127.0.0.1:7681' (Join-Path $work 'cf.log')
               $nu = Wait-CfUrl (Join-Path $work 'cf.log') 30
               if ($nu) { $script:TTYD_URL = $nu }
-              $l2 = (Get-Process cf -EA SilentlyContinue | Measure-Object).Count
-              if ($RDP_URL -and $l2 -lt 2) {
-                Start-Cf 'tcp://127.0.0.1:3389' (Join-Path $work 'cf2.log')
-                $n2 = Wait-CfUrl (Join-Path $work 'cf2.log') 30
-                if ($n2) { $script:RDP_URL = $n2; $script:RDP_CT = Seal $RDP_PASS }
-              }
               $changed = $true
             }
+
             $TTYD_ORIGIN = $code
             if ($changed -or ((Get-Date) - $lastPublish).TotalMinutes -ge 20) {
               Publish @{ note = $rdpNote }
@@ -218,9 +293,9 @@ jobs:
             }
           }
 
-          $dead = @{ alive = $false; url = $TTYD_URL; rdp_url = $RDP_URL; closed = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); run_id = '${{ github.run_id }}'; restarts = $script:RESTARTS } | ConvertTo-Json -Compress
+          $dead = @{ alive = $false; url = $TTYD_URL; rdp_url = $RDP_URL; closed = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); run_id = '${{ github.run_id }}'; restarts = $script:RESTARTS; named = $NAMED } | ConvertTo-Json -Compress
           Set-Content -Path (Join-Path $work 'winterm/session.json') -Value $dead -Encoding ascii
           git add -f winterm/session.json
           git commit -qm "winterm closed $((Get-Date).ToUniversalTime().ToString('s'))Z"
-          git push -q origin HEAD:${{ github.ref_name }}
+          git push -q origin HEAD:$ref
           exit 0
