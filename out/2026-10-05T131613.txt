@@ -1,0 +1,22 @@
+task        probe runner sizing variance
+run         37315486927 attempt=1 sha=7caa8a2a96
+trigger     push by kunge520
+started     2026-10-05T13:16:13Z
+
+== runner sizing sample ==
+at 2026-10-05T13:16:13Z
+nproc        = 4
+cpuinfo      = 4 logical,  AMD EPYC 9V74 80-Core Processor
+CPU(s):                                  4
+Model name:                              AMD EPYC 9V74 80-Core Processor
+Thread(s) per core:                      2
+Core(s) per socket:                      2
+Socket(s):                               1
+cgroup limit = cpu:  memory:
+mem          = 15.61 GiB
+disk avail   = 87G free of 145G
+
+== a real 30-second cpu burn on all cores (what 1 free minute actually buys) ==
+burned 30s x 4 cores; load now: 2.04 0.55 0.19 1/254 2126
+
+task_exit   0
