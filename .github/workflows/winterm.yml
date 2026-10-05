@@ -55,28 +55,45 @@ jobs:
           Write-Host ("binaries ttyd=" + $ttydUrl + "  cf=" + (Get-Item cf.exe).Length + "B  ttyd=" + (Get-Item ttyd.exe).Length + "B")
 
           $work = $PWD.Path
+          # Set the identity BEFORE anything can commit: the first Windows run reached the failure
+          # path, and git refused with "Author identity unknown" because user.name was only
+          # configured on the success path -- so no diagnostics ever landed in the repo.
+          git config user.name winterm
+          git config user.email winterm@users.noreply.github.com
+
           Start-Process -FilePath (Join-Path $work 'ttyd.exe') -ArgumentList @('-p', '7681', '-W', '-c', "fleet:$PASS", 'cmd') -RedirectStandardOutput (Join-Path $work "ttyd.out") -RedirectStandardError (Join-Path $work "ttyd.err") -NoNewWindow
-          Start-Sleep -Seconds 4
+          Start-Sleep -Seconds 5
+          # Probe the origin first, so a dead ttyd is distinguishable from a dead tunnel.
+          $orig = try { (Invoke-WebRequest -Uri 'http://127.0.0.1:7681/' -UseBasicParsing -TimeoutSec 8).StatusCode } catch { if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 'err:' + $_.Exception.Message } }
+          Write-Host ("origin 127.0.0.1:7681 -> " + $orig + "  ttyd_pid=" + ((Get-Process ttyd -EA SilentlyContinue).Id -join ',') + "  ttyd_size=" + (Get-Item ttyd.exe).Length)
+          Get-Content (Join-Path $work 'ttyd.err') -Tail 10 -EA SilentlyContinue | ForEach-Object { Write-Host ("ttyd.err: " + $_) }
+
           # http2 keeps the connector on tcp/443; QUIC's udp/7844 is often dropped in Azure.
-          Start-Process -FilePath (Join-Path $work 'cf.exe') -ArgumentList @('tunnel', '--url', 'http://127.0.0.1:7681', '--no-autoupdate', '--protocol', 'http2') -RedirectStandardOutput (Join-Path $work "cf.log") -RedirectStandardError (Join-Path $work "cf.err") -NoNewWindow
+          # --logfile, not shell redirection: the first Windows run left the redirected stdout file
+          # empty for 90 s while cloudflared had already registered the tunnel, so the URL was
+          # unreachable by parsing. cloudflared's own log file is what actually carries it.
+          Start-Process -FilePath (Join-Path $work 'cf.exe') -ArgumentList @('tunnel', '--url', 'http://127.0.0.1:7681', '--no-autoupdate', '--protocol', 'http2', '--logfile', (Join-Path $work 'cf.log')) -RedirectStandardOutput (Join-Path $work "cf.stdout") -RedirectStandardError (Join-Path $work "cf.stderr") -NoNewWindow
 
           $U = ''
-          for ($i = 0; $i -lt 45; $i++) {
-            $logTxt = ''
-            if (Test-Path cf.log) { $logTxt = Get-Content cf.log -Raw }
-            $m = [regex]::Match($logTxt, 'https://[a-z0-9-]+\.trycloudflare\.com')
-            if ($m.Success) { $U = $m.Value; break }
+          $cfTxt = ''
+          for ($i = 0; $i -lt 60; $i++) {
+            $cfTxt = ''
+            if (Test-Path cf.log) { $cfTxt = (Get-Content cf.log -Raw -EA SilentlyContinue) }
+            if ($cfTxt) {
+              $m = [regex]::Match($cfTxt, 'https://[a-z0-9-]+\.trycloudflare\.com')
+              if ($m.Success) { $U = $m.Value; break }
+            }
+            if ($i -eq 14 -or $i -eq 44) { Write-Host ("still waiting, cf.log bytes=" + $cfTxt.Length + " cf.stderr tail:") ; Get-Content (Join-Path $work 'cf.stderr') -Tail 6 -EA SilentlyContinue | ForEach-Object { Write-Host ("  " + $_) } }
             Start-Sleep -Seconds 2
           }
-          $orig = try { (Invoke-WebRequest -Uri 'http://127.0.0.1:7681/' -UseBasicParsing -TimeoutSec 8).StatusCode } catch { $_.Exception.Response.StatusCode.value__ }
 
           if (-not $U) {
             Write-Host '=== no tunnel URL, dumping diagnostics ==='
-            foreach ($f in 'cf.log', 'cf.err', 'ttyd.out', 'ttyd.err') {
+            foreach ($f in 'cf.log', 'cf.stderr', 'cf.stdout', 'ttyd.out', 'ttyd.err') {
               Write-Host ("---- " + $f)
               if (Test-Path $f) { Get-Content $f -Tail 25 | ForEach-Object { Write-Host $_ } }
             }
-            $diag = @{ alive = $false; error = 'no tunnel url'; origin_http = "$orig"; cf_err = (Get-Content cf.err -Raw -ErrorAction SilentlyContinue); ttyd_err = (Get-Content ttyd.err -Raw -ErrorAction SilentlyContinue); run_id = '${{ github.run_id }}' } | ConvertTo-Json -Compress
+            $diag = @{ alive = $false; error = 'no tunnel url'; origin_http = "$orig"; cf_log = ((Get-Content cf.log -Raw -EA SilentlyContinue) -split "`n" | Select-Object -Last 30) -join ' | '; cf_err = ((Get-Content cf.stderr -Raw -EA SilentlyContinue) -split "`n" | Select-Object -Last 20) -join ' | '; ttyd_err = (Get-Content ttyd.err -Raw -EA SilentlyContinue); run_id = '${{ github.run_id }}' } | ConvertTo-Json -Compress
             Set-Content -Path winterm-diag.json -Value $diag -Encoding ascii
             git add -f winterm-diag.json
             git commit -qm "winterm diag $((Get-Date).ToUniversalTime().ToString('s'))Z"
@@ -100,8 +117,6 @@ jobs:
           } | ConvertTo-Json -Compress
           Write-Host ('WINTERM-JSON ' + $body)
 
-          git config user.name winterm
-          git config user.email winterm@users.noreply.github.com
           New-Item -ItemType Directory -Force -Path winterm | Out-Null
           Set-Content -Path winterm/session.json -Value $body -Encoding ascii
           git add -f winterm/session.json
