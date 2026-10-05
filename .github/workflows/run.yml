@@ -1,0 +1,56 @@
+name: job-runner
+
+# Public repo => GitHub-hosted Linux minutes are unmetered, so this is a compute channel
+# rather than a scheduled chore: push any file under job/ and the run picks up job/task.sh,
+# executes it and commits the transcript to out/<utc>.txt. That commit is outside the paths
+# filter, so it cannot loop.
+#
+# Only `push` to main runs code -- never pull_request -- and this repo holds NO secrets, so a
+# fork has nothing to steal and nothing to execute.
+
+on:
+  push:
+    paths:
+      - 'job/**'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  task:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the submitted task
+        run: |
+          set +e
+          sed -i 's/\r$//' job/task.sh
+          mkdir -p out
+          f="out/$(date -u +%FT%H%M%S).txt"
+          {
+            echo "task        $(git log -1 --pretty=%s)"
+            echo "run         ${GITHUB_RUN_ID} attempt=${GITHUB_RUN_ATTEMPT} sha=${GITHUB_SHA:0:10}"
+            echo "trigger     ${GITHUB_EVENT_NAME} by ${GITHUB_ACTOR}"
+            echo "started     $(date -u +%FT%TZ)"
+            echo
+            bash job/task.sh
+            echo
+            echo "task_exit   $?"
+          } > "$f" 2>&1
+          echo "wrote $f ($(wc -c < "$f") bytes)"
+          ls -1t out/*.txt | tail -n +31 | xargs -r rm -f
+
+      - name: Publish the result
+        run: |
+          set +e
+          git config user.name job-runner
+          git config user.email runner@users.noreply.github.com
+          git add -A out job
+          git diff --cached --quiet || git commit -qm "task result $(date -u +%FT%TZ)"
+          for i in 1 2 3 4 5; do
+            git pull --rebase -q origin "${GITHUB_REF_NAME}" && git push -q origin "HEAD:${GITHUB_REF_NAME}" && { echo "published"; break; }
+            echo "push attempt $i failed, retrying"; sleep 6
+          done
