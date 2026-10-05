@@ -214,6 +214,30 @@ jobs:
             $listen = (Get-NetTCPConnection -LocalPort 3389 -State Listen -EA SilentlyContinue | Measure-Object).Count
             $rdpNote = 'TermService=' + (Get-Service TermService -EA SilentlyContinue).Status + ' listeners3389=' + $listen + ' user=' + [bool](Get-LocalUser -Name 'fleet' -EA SilentlyContinue)
             if ($listen -ge 1) { $script:RDP_URL = 'https://rdp.kun9.ccwu.cc' } else { $rdpNote = 'NO-3389-LISTENER; ' + $rdpNote }
+            # Does RDP answer a dial from INSIDE the VM? A listener count alone cannot tell a working
+            # terminal server from one that accepts and immediately resets, which is exactly the
+            # difference between "the runner's RDP is broken" and "the tunnel is broken".
+            try {
+              $tc = New-Object Net.Sockets.TcpClient
+              $ar = $tc.BeginConnect('127.0.0.1', 3389, $null, $null)
+              if ($ar.AsyncWaitHandle.WaitOne(5000)) {
+                $tc.EndConnect($ar)
+                $ns = $tc.GetStream(); $ns.ReadTimeout = 6000
+                $cra = [byte[]]@(3, 0, 0, 15, 10, 224, 0, 0, 0, 0, 0, 1, 0, 8, 0)
+                $ns.Write($cra, 0, $cra.Length)
+                $rb = New-Object byte[] 32
+                $n = $ns.Read($rb, 0, 32)
+                if ($n -gt 0) { $rdpNote = $rdpNote + ' loop-x224=' + (($rb[0..($n - 1)] | ForEach-Object { $_.ToString('x2') }) -join ' ') }
+                else { $rdpNote = $rdpNote + ' loop-x224=closed' }
+              } else { $rdpNote = $rdpNote + ' loop-x224=connect-timeout' }
+              $tc.Close()
+            } catch { $rdpNote = $rdpNote + ' loop-x224=err:' + ($_.Exception.Message -replace '\s+', ' ') }
+            # relay in front of 3389: if the listener is fine but cloudflared's own dial is not,
+            # routing through netsh's portproxy still lands on the same terminal server.
+            & netsh interface portproxy add v4tov4 listenaddress=127.0.0.1 listenport=13389 connectaddress=127.0.0.1 connectport=3389 2>&1 | Out-Null
+            $rdpNote = $rdpNote + ' relay=' + (Get-NetTCPConnection -LocalPort 13389 -State Listen -EA SilentlyContinue | Measure-Object).Count
+            $l13 = (Get-NetTCPConnection -LocalPort 13389 -State Listen -EA SilentlyContinue | Measure-Object).Count
+            if ($l13 -ge 1) { $script:RDP_URL = 'https://rdp.kun9.ccwu.cc' }
           } catch { $rdpNote = 'rdp enable failed: ' + $_.Exception.Message }
           Write-Host ('rdp setup: ' + $rdpNote)
 
