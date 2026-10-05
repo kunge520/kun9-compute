@@ -350,6 +350,26 @@ try {
   # the very first byte. The listener only picks the settings up when it is rebuilt.
   Restart-Service TermService -Force -EA SilentlyContinue
   Start-Sleep -Seconds 5
+  # The registry read-back said SecurityLayer=1/UserAuthentication=0 while the listener still answered a
+  # probe with PROTOCOL_HYBRID, i.e. NLA on. Only the terminal server's own WMI provider reports (and
+  # sets) what it actually applied, so drive NLA through it and publish the effective numbers.
+  $GEN = 'err'
+  for ($try = 1; $try -le 2; $try++) {
+    try {
+      $gp = 'root\cimv2\terminalservices'
+      $g = Get-CimInstance -Namespace $gp -ClassName Win32_TSGeneralSetting -Filter "TerminalName='RDP-tcp'" -EA Stop
+      if ([int]$g.UserAuthenticationRequired -ne 0) {
+        # 1 = enable, 2 = disable; the second pass only runs if the first read-back still says required
+        $ua = 2
+        if ($try -eq 2) { $ua = 1 }
+        [void](Invoke-CimMethod -InputObject $g -MethodName SetUserAuthenticationRequirement -Arguments @{ UserAuthentication = $ua } -EA SilentlyContinue)
+      }
+      [void](Invoke-CimMethod -InputObject $g -MethodName SetSecurityLayer -Arguments @{ SecurityLayer = 1 } -EA SilentlyContinue)
+      $g2 = Get-CimInstance -Namespace $gp -ClassName Win32_TSGeneralSetting -Filter "TerminalName='RDP-tcp'" -EA Stop
+      $GEN = 'ua' + [int]$g2.UserAuthenticationRequired + ' sl' + [int]$g2.SecurityLayer + ' enc' + [int]$g2.EncryptionLevel + ' t=' + [int]$try
+      if ([int]$g2.UserAuthenticationRequired -eq 0) { break }
+    } catch { $GEN = 'wmerr:' + ($_.Exception.Message -replace '\s+', ' ').Substring(0, [Math]::Min(40, ($_.Exception.Message -replace '\s+', ' ').Length)) + ' t' + $try }
+  }
   $owners = ''
   foreach($e in @(Get-NetTCPConnection -LocalPort 3389 -State Listen -EA SilentlyContinue)) {
     $pn = ''
@@ -366,7 +386,7 @@ try {
     else { $cc = @(Get-ChildItem $cd -EA SilentlyContinue); $rdpcert = if ($cc.Count) { $cc.Count } else { 'empty' } }
   } catch { }
   $rdpNote = 'TermService=' + (Get-Service TermService -EA SilentlyContinue).Status + ' listeners3389=' + $listen + ' user=' + [bool](Get-LocalUser -Name 'fleet' -EA SilentlyContinue) + ' owners=' + $owners.Trim()
-  $rdpNote = $rdpNote + ' rdpcert=' + $rdpcert
+  $rdpNote = $rdpNote + ' rdpcert=' + $rdpcert + ' gen=' + $GEN
   if ($listen -ge 1) { $script:RDP_URL = 'https://rdp.kun9.ccwu.cc' } else { $rdpNote = 'NO-3389-LISTENER; ' + $rdpNote }
   # Does RDP answer a dial from INSIDE the VM? A listener count alone cannot tell a working
   # terminal server from one that accepts and immediately resets, which is exactly the
