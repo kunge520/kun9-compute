@@ -96,7 +96,7 @@ jobs:
               rdp_url = $RDP_URL; rdp_user = 'fleet'; rdp_cipher = $RDP_CT
               ttl_min = $MIN; opened = $OPENED; ends = $ENDS
               origin_http = "$TTYD_ORIGIN"; restarts = $RESTARTS; cf_procs = $CFN; ttyd_procs = $TTYN
-              tail_err = (Tail (Join-Path $work 'ttyd.err') 3)
+              tail_err = (Tail (Join-Path $work 'ttyd.err') 3); cf_tail = (Tail (Join-Path $work 'cf.log') 2)
             }
             foreach ($k in $extra.Keys) { $body[$k] = $extra[$k] }
             $json = $body | ConvertTo-Json -Compress
@@ -148,19 +148,22 @@ jobs:
           try {
             Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -Force
             Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0 -Force -EA SilentlyContinue
+            Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fSingleSessionPerUser -Value 0 -Force -EA SilentlyContinue
             Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -EA SilentlyContinue
             $sec = ConvertTo-SecureString $RDP_PASS -AsPlainText -Force
             $existing = Get-LocalUser -Name 'fleet' -EA SilentlyContinue
-            if ($existing) { Set-LocalUser -Name 'fleet' -Password $sec -EA SilentlyContinue } else { New-LocalUser -Name 'fleet' -Password $sec -AccountNeverExpires -PasswordNeverExpires -UserPasswordRequired $true | Out-Null }
+            if ($existing) { Set-LocalUser -Name 'fleet' -Password $sec -EA SilentlyContinue } else { New-LocalUser -Name 'fleet' -Password $sec -AccountNeverExpires -PasswordNeverExpires | Out-Null }
             Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'fleet' -EA SilentlyContinue
             Add-LocalGroupMember -Group 'Administrators' -Member 'fleet' -EA SilentlyContinue
+            Set-Service TermService -StartupType Manual -EA SilentlyContinue
             Start-Service TermService -EA SilentlyContinue
             $listen = (Get-NetTCPConnection -LocalPort 3389 -State Listen -EA SilentlyContinue | Measure-Object).Count
-            Write-Host ('rdp setup: TermService=' + (Get-Service TermService -EA SilentlyContinue).Status + ' listeners on 3389=' + $listen)
+            $rdpNote = 'TermService=' + (Get-Service TermService -EA SilentlyContinue).Status + ' listeners3389=' + $listen + ' user=' + [bool](Get-LocalUser -Name 'fleet' -EA SilentlyContinue)
+            Write-Host ('rdp setup: ' + $rdpNote)
             if ($listen -ge 1) {
               Start-Cf 'tcp://127.0.0.1:3389' (Join-Path $work 'cf2.log')
               $RDP_URL = Wait-CfUrl (Join-Path $work 'cf2.log') 45
-            } else { $rdpNote = 'no 3389 listener' }
+            } else { $rdpNote = 'no 3389 listener; ' + $rdpNote }
           } catch { $rdpNote = 'rdp enable failed: ' + $_.Exception.Message }
           Write-Host ('rdp_url=' + $RDP_URL + '  note=' + $rdpNote)
 
