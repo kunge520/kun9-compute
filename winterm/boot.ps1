@@ -315,9 +315,20 @@ $namedStable = $false
 try {
   Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -Force
   Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0 -Force -EA SilentlyContinue
-  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name SecurityLayer -Value 0 -Force -EA SilentlyContinue
+  # SecurityLayer 1 = TLS without NLA. Layer 0 ("standard RDP security") is what a plain mstsc gets
+  # today from this image, and it dies mid-handshake: the client and server complete X.224 and MCS
+  # setup, then the server stops answering the join for the user channel (1004). TLS is the layer
+  # every Windows client actually wants, and leaving UserAuthentication at 0 keeps CredSSP -- and its
+  # encryption-oracle/self-signed-cert refusals on a workgroup machine -- out of the picture.
+  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name SecurityLayer -Value 1 -Force -EA SilentlyContinue
   # a WinStation can be listening while switched off, which shows up the same way
   Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name fEnableWinStation -Value 1 -Force -EA SilentlyContinue
+  # A Group Policy SecurityLayer/UserAuthentication beats the WinStations values, and the runner image
+  # can carry one. Write the same numbers into the policy key so "effective" and "what we read back" agree.
+  $pol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+  if (-not (Test-Path $pol)) { New-Item -Path $pol -Force | Out-Null }
+  Set-ItemProperty -Path $pol -Name SecurityLayer -Value 1 -Force -EA SilentlyContinue
+  Set-ItemProperty -Path $pol -Name UserAuthentication -Value 0 -Force -EA SilentlyContinue
   # This is a Windows *client* SKU: console session + one remote session is the hard ceiling, and a
   # disconnected remote session still holds its slot. With one session per user the next connect rejoins
   # the session that is already there instead of opening a second one the server then tears down (that
@@ -346,7 +357,16 @@ try {
     $owners = $owners + "$($e.Address):$($e.LocalPort)/$pn "
   }
   $listen = (Get-NetTCPConnection -LocalPort 3389 -State Listen -EA SilentlyContinue | Measure-Object).Count
+  # TLS with no NLA needs the listener's own self-signed certificate; if the store is empty the
+  # handshake dies after the X.224 confirm and looks like a dead origin from the client side.
+  $rdpcert = 'err'
+  try {
+    $cd = 'Cert:\LocalMachine\Remote Desktop'
+    if (-not (Test-Path $cd)) { $rdpcert = 'nostore' }
+    else { $cc = @(Get-ChildItem $cd -EA SilentlyContinue); $rdpcert = if ($cc.Count) { $cc.Count } else { 'empty' } }
+  } catch { }
   $rdpNote = 'TermService=' + (Get-Service TermService -EA SilentlyContinue).Status + ' listeners3389=' + $listen + ' user=' + [bool](Get-LocalUser -Name 'fleet' -EA SilentlyContinue) + ' owners=' + $owners.Trim()
+  $rdpNote = $rdpNote + ' rdpcert=' + $rdpcert
   if ($listen -ge 1) { $script:RDP_URL = 'https://rdp.kun9.ccwu.cc' } else { $rdpNote = 'NO-3389-LISTENER; ' + $rdpNote }
   # Does RDP answer a dial from INSIDE the VM? A listener count alone cannot tell a working
   # terminal server from one that accepts and immediately resets, which is exactly the
@@ -357,14 +377,19 @@ try {
     if ($ar.AsyncWaitHandle.WaitOne(5000)) {
       $tc.EndConnect($ar)
       $ns = $tc.GetStream(); $ns.ReadTimeout = 6000
-      # 19-byte X.224 CR with a complete RDP_NEG_REQ. A truncated one (the 15-byte form)
-      # makes Windows reset the socket, which looks exactly like a dead origin.
-      $cra = [byte[]]@(3, 0, 0, 19, 14, 224, 0, 0, 0, 0, 0, 0, 0, 1, 0, 8, 0, 1, 0, 0, 0)
+      # 19-byte X.224 CR carrying a well-formed RDP_NEG_REQ that offers PROTOCOL_SSL|PROTOCOL_HYBRID.
+      # Whatever comes back names the layer the listener really picked, which is the one thing the
+      # registry cannot tell us.
+      $cra = [byte[]]@(3, 0, 0, 19, 14, 224, 0, 0, 0, 0, 0, 1, 0, 8, 0, 3, 0, 0, 0)
       $ns.Write($cra, 0, $cra.Length)
       $rb = New-Object byte[] 32
       $n = $ns.Read($rb, 0, 32)
-      if ($n -gt 0) { $rdpNote = $rdpNote + ' loop-x224=' + (($rb[0..($n - 1)] | ForEach-Object { $_.ToString('x2') }) -join ' ') }
-      else { $rdpNote = $rdpNote + ' loop-x224=closed' }
+      if ($n -gt 0) {
+        $rdpNote = $rdpNote + ' loop-x224=' + (($rb[0..($n - 1)] | ForEach-Object { $_.ToString('x2') }) -join ' ')
+        # a NEG_RSP/NEG_FAILURE is the last 8 bytes; type 2 = selected a layer, 3 = refused
+        if ($n -ge 19) { $rdpNote = $rdpNote + ' sel=' + $rb[($n - 8)].ToString('x2') + '/' + $rb[($n - 4)].ToString('x2') + $rb[($n - 3)].ToString('x2') }
+        else { $rdpNote = $rdpNote + ' sel=none' }
+      } else { $rdpNote = $rdpNote + ' loop-x224=closed' }
     } else { $rdpNote = $rdpNote + ' loop-x224=connect-timeout' }
     $tc.Close()
   } catch { $rdpNote = $rdpNote + ' loop-x224=err:' + ($_.Exception.Message -replace '\s+', ' ') }
