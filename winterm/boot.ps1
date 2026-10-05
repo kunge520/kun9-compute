@@ -128,58 +128,77 @@ function ShortTxt([string]$s, [int]$n) {
 
 function Set-FixedLogin([string]$user, [string]$pass) {
   # The user asked for ONE login that never changes: rdp.kun9.ccwu.cc + administrator + their own
-  # password. A 7-digit password is refused while "password must meet complexity requirements" is
-  # on, and that policy is not fixed across runner images, so it gets switched off with a template
-  # of our own -- editing the exported one in place is not enough, because the key is often absent
-  # from the export entirely -- and then every way of setting the password is tried.
-  # The whole attempt log is RETURNED, because a bare FAILED with no reason cost a full boot cycle
-  # to diagnose: the heartbeat is the only place this can be read (job logs stay BlobNotFound).
+  # password. Two things get in the way on a GitHub runner, and both are measured here rather than
+  # assumed:
+  #  - "password must meet complexity requirements" is on and a 7-digit password fails it. It is
+  #    switched off with a template of our own, because rewriting the exported policy in place is
+  #    not enough -- the key is usually absent from the export altogether.
+  #  - the built-in admin does NOT necessarily answer to "Administrator" on these images (measured:
+  #    Get-LocalUser found no such account), so the RID-500 account is looked up by SID, gets the
+  #    same password under its own name, and the requested name is created when it is free.
+  # The whole attempt log is RETURNED into the heartbeat, because a bare FAILED with no reason cost
+  # a full boot cycle to diagnose -- job logs stay BlobNotFound while the session is live.
   $log = New-Object Collections.Generic.List[string]
   $sec = ConvertTo-SecureString $pass -AsPlainText -Force
-  $u = Get-LocalUser -Name $user -EA SilentlyContinue
-  if (-not $u) { return 'no-such-user' }
-  $log += ('pre en=' + [int]($u.Enabled) + ' pwreq=' + [int]($u.PasswordRequired) + ' exp=' + [int]($u.PasswordExpired))
-  Enable-LocalUser -Name $user -EA SilentlyContinue
-  Add-LocalGroupMember -Group 'Administrators' -Member $user -EA SilentlyContinue
+  $log += ('names=' + (ShortTxt (((Get-LocalUser -EA SilentlyContinue | ForEach-Object { $_.Name }) -join ',')) 80))
   Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name LimitBlankPasswordUse -Value 0 -Force -EA SilentlyContinue
 
   $inf = Join-Path $env:TEMP 'plx.inf'
   & secedit.exe /export /cfg $inf /quiet 2>$null | Out-Null
-  $pc = '?'; $ml = '?'
   $t = (Get-Content $inf -Raw -EA SilentlyContinue)
-  if ($t -match '(?m)^PasswordComplexity\s*=\s*(\d)') { $pc = $matches[1] }
-  if ($t -match '(?m)^MinimumPasswordLength\s*=\s*(\d)') { $ml = $matches[1] }
+  $pc = if ($t -match '(?m)^PasswordComplexity\s*=\s*(\d)') { $matches[1] } else { 'absent' }
+  $ml = if ($t -match '(?m)^MinimumPasswordLength\s*=\s*(\d)') { $matches[1] } else { 'absent' }
   $log += ('cpx=' + $pc + ' minlen=' + $ml)
-
-  try { Set-LocalUser -Name $user -Password $sec -EA Stop; $log += ('m1=' + (Test-Login $user $pass)) }
-  catch { $log += ('m1:' + (ShortTxt $_.Exception.Message 44)) }
 
   $tmpl = Join-Path $env:TEMP 'cpxoff.inf'
   Set-Content -Path $tmpl -Value ("[System Access]`r`nMinimumPasswordLength = 0`r`nPasswordComplexity = 0`r`n") -Encoding ascii
-  $o = (& secedit.exe /configure /db 'C:\Windows\Security\Database\secedit.sdb' /cfg $tmpl /areas SECURITYPOLICY /overwrite /quiet 2>&1) -join ' '
-  $log += ('sec=' + $LASTEXITCODE + ':' + (ShortTxt $o 34))
+  & secedit.exe /configure /db 'C:\Windows\Security\Database\secedit.sdb' /cfg $tmpl /areas SECURITYPOLICY /overwrite /quiet 2>&1 | Out-Null
+  $sc = $LASTEXITCODE
   & secedit.exe /export /cfg $inf /quiet 2>$null | Out-Null
   $t2 = (Get-Content $inf -Raw -EA SilentlyContinue)
   $pc2 = if ($t2 -match '(?m)^PasswordComplexity\s*=\s*(\d)') { $matches[1] } else { 'gone' }
-  $log += ('cpx2=' + $pc2)
+  $log += ('sec=' + $sc + ' cpx2=' + $pc2)
 
-  try { Set-LocalUser -Name $user -Password $sec -EA Stop; $log += ('m2=' + (Test-Login $user $pass)) }
-  catch { $log += ('m2:' + (ShortTxt $_.Exception.Message 44)) }
+  if (-not (Get-LocalUser -Name $user -EA SilentlyContinue)) {
+    $b500 = Get-CimInstance Win32_UserAccount -EA SilentlyContinue | Where-Object { $_.SID -match '-500$' } | Select-Object -First 1
+    if ($b500) {
+      $log += ('rid500=' + (ShortTxt $b500.Name 18) + '/' + [int]($b500.Disabled))
+      if ($b500.Name -ne $user) {
+        try { Set-LocalUser -Name $b500.Name -Password $sec -EA Stop; $log += ('alt=' + (Test-Login $b500.Name $pass)) }
+        catch { $log += ('alt-err:' + (ShortTxt $_.Exception.Message 40)) }
+      }
+    } else { $log += 'rid500=none' }
+    try {
+      New-LocalUser -Name $user -Password $sec -AccountNeverExpires -PasswordNeverExpires -EA Stop | Out-Null
+      $log += ('new=' + (Test-Login $user $pass))
+    } catch { $log += ('new-err:' + (ShortTxt $_.Exception.Message 44)) }
+  }
 
-  try {
-    $ad = [ADSI]('WinNT://./' + $user + ',user')
-    $ad.SetPassword($pass)
-    $ad.SetInfo()
-    $ad.PasswordExpires = $false
-    $ad.SetInfo()
-    $log += ('m3=' + (Test-Login $user $pass))
-  } catch { $log += ('m3:' + (ShortTxt $_.Exception.Message 44)) }
+  $u = Get-LocalUser -Name $user -EA SilentlyContinue
+  if (-not $u) { return 'STILL-no-such-user | ' + ($log -join ' | ') }
+  Enable-LocalUser -Name $user -EA SilentlyContinue
+  try { Set-LocalUser -Name $user -Password $sec -EA Stop } catch { $log += ('set-err:' + (ShortTxt $_.Exception.Message 40)) }
+  try { Set-LocalUser -Name $user -PasswordNeverExpires $true -AccountNeverExpires -EA SilentlyContinue } catch { }
+  Add-LocalGroupMember -Group 'Administrators' -Member $user -EA SilentlyContinue
+  Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $user -EA SilentlyContinue
 
-  $nu = (& net.exe user $user $pass 2>&1) -join ' '
-  $log += ('m4=' + $LASTEXITCODE + ':' + (ShortTxt $nu 30) + ' test=' + (Test-Login $user $pass))
-
+  $ok = Test-Login $user $pass
+  if ($ok -ne 'ok') {
+    try {
+      $ad = [ADSI]('WinNT://./' + $user + ',user')
+      $ad.SetPassword($pass); $ad.SetInfo(); $ad.PasswordExpires = $false; $ad.SetInfo()
+      $ok = Test-Login $user $pass
+      $log += ('adsi=' + $ok)
+    } catch { $log += ('adsi-err:' + (ShortTxt $_.Exception.Message 40)) }
+  }
+  if ($ok -ne 'ok') {
+    $nu = (& net.exe user $user $pass 2>&1) -join ' '
+    $ok = Test-Login $user $pass
+    $log += ('net=' + $LASTEXITCODE + ':' + (ShortTxt $nu 26) + ' ' + $ok)
+  }
+  $log += ('en=' + [int](Get-LocalUser -Name $user -EA SilentlyContinue).Enabled)
   $out = ($log -join ' | ')
-  if ($out -match 'm[0-9]=ok|test=ok') { return 'ok ' + $out }
+  if ($ok -eq 'ok') { return 'OK ' + $out }
   return 'FAILED ' + $out
 }
 
