@@ -335,3 +335,15 @@ Show $hit (Unseal $hit.cipher)
 # five minutes, and there is no reason for the Remote Desktop window to wait behind it.
 Invoke-Rdp $hit
 if (-not $script:NOGUI) { Probe $hit (Unseal $hit.cipher) } else { Write-Host 'probe      ttyd probe skipped (auto-renew)' }
+
+# Only -Cmd stop un-arms the renewer, and -Cmd start never re-armed it -- so a machine started after a
+# stop ran on borrowed time and vanished at the 6 h cap with nothing on screen explaining why (that is
+# exactly how the address died twice on 2026-10-06). Asking for a machine is asking for one that stays,
+# so arm the timer again here. -Cmd stop still means stop: it turns this back off.
+if (-not (Get-ScheduledTask -TaskName 'kun9_wt_renew' -EA SilentlyContinue)) {
+    $rn = Join-Path $PSScriptRoot '_renew.ps1'
+    if (Test-Path $rn) {
+        $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        & $ps -NoProfile -ExecutionPolicy Bypass -File $rn -Toggle 2>&1 | ForEach-Object { Write-Host ('' + $_) }
+    } else { Write-Host 'renew    CANNOT arm, _renew.ps1 is not next to this script' }
+}
