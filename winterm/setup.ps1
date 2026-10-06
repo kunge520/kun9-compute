@@ -110,13 +110,22 @@ if ($Rdp) {
     if (-not (Test-Path $rdpDir)) { New-Item -ItemType Directory -Path $rdpDir -Force | Out-Null }
     $dst = Join-Path $rdpDir 'rdp.ps1'
     $r = Fetch 'rdp.ps1' $dst
-    if (-not $r) {
-        Write-Host 'FAIL   rdp.ps1 could not be downloaded from jsdelivr, github-raw or the relay.'
-        Write-Host '       Put rdp.ps1 here by hand (from the packed folder) and double-click it.'
-        if (-not $NoPause) { Read-Host 'Press Enter' | Out-Null }
-        exit 1
+    if ($r) {
+        Write-Host ('got    rdp.ps1  ' + $r.bytes + ' B  from ' + $r.src + '  sha1=' + $r.sha.Substring(0, 12))
+    } else {
+        # All three sources dead (or this computer has no route to GitHub at all). The packed folder
+        # carries an offline copy of the same file, so use it instead of telling the user to copy by hand.
+        $near = $null
+        if ($PSScriptRoot) { $c = Join-Path $PSScriptRoot 'rdp.ps1'; if (Test-Path $c) { $near = $c } }
+        if (-not $near) {
+            Write-Host 'FAIL   rdp.ps1 could not be downloaded from jsdelivr, github-raw or the relay.'
+            Write-Host '       Put rdp.ps1 here by hand (from the packed folder) and double-click it.'
+            if (-not $NoPause) { Read-Host 'Press Enter' | Out-Null }
+            exit 1
+        }
+        Copy-Item $near $dst -Force
+        Write-Host ('got    rdp.ps1  ' + (Get-Item $dst).Length + ' B  from the copy next to this script  sha1=' + (Sha1 $dst).Substring(0, 12))
     }
-    Write-Host ('got    rdp.ps1  ' + $r.bytes + ' B  from ' + $r.src + '  sha1=' + $r.sha.Substring(0, 12))
     Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
     & $dst
     exit $LASTEXITCODE
