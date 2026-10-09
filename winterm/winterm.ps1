@@ -3,8 +3,8 @@ param(
     [string]$Cmd = 'start',
     [int]$Minutes = 60,
     [int]$WaitSec = 420,
-    # set by the auto-renewer: no mstsc window, no ttyd probe, and no secrets printed, because
-    # whatever this run writes to stdout is what lands in renew.log
+    # headless use: no mstsc window, no ttyd probe, and no secrets printed, because whatever
+    # this run writes to stdout is meant to be pasted into a chat or saved to a log
     [switch]$NoGui
 )
 # Windows browser terminal inside a GitHub-hosted VM on the PUBLIC repo (unmetered), where the
@@ -77,7 +77,7 @@ function Show($s, $pass) {
     Write-Host '================  WINDOWS VM  ================'
     Write-Host ('url        ' + $s.url)
     Write-Host ('user       ' + $s.user)
-    if (-not $script:NOGUI) { Write-Host ('password   ' + $pass) } else { Write-Host 'password   (suppressed: auto-renew run, output goes to renew.log)' }
+    if (-not $script:NOGUI) { Write-Host ('password   ' + $pass) } else { Write-Host 'password   (suppressed: -NoGui, safe to paste)' }
     Write-Host ('ttl        ' + $s.ttl_min + ' min, ends ' + $s.ends)
     Write-Host ('state      origin_http=' + $s.origin_http + '  restarts=' + $s.restarts + '  checked ' + $s.check)
     if ($s.named) { Write-Host ('tunnel     named=' + $s.named + '  procs=' + $s.named_procs + '  quick=' + $s.cf_procs) }
