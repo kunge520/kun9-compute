@@ -196,15 +196,14 @@ function Invoke-Rdp($preset) {
     & cmdkey.exe ('/generic:TERMSRV/' + $hname + ':13389') ('/user:' + $lu) ('/pass=' + $rp) 2>&1 | Out-Null
     & cmdkey.exe ('/generic:TERMSRV/' + $hname) ('/user:' + $lu) ('/pass=' + $rp) 2>&1 | Out-Null
     Write-Host ('login      ' + $lu + '   address=' + $hname + ':13389   ends ' + $s.ends + '   client=' + $client)
-    # Today the machine went unreachable and the reason turned out to be that the renewer had been
-    # switched off half an hour earlier -- nothing on screen said so. A connect that keeps working for
-    # six hours and then vanishes is not the same as a permanent one, so say which of the two it is.
-    $rnOn = [bool](Get-ScheduledTask -TaskName 'kun9_wt_renew' -EA SilentlyContinue)
-    if ($rnOn) { Write-Host 'renew    ON   a fresh machine is started before the 6 h cap, same address and login' }
-    else { Write-Host ('renew    OFF  this machine lapses at ' + $s.ends + ' -- double-click shortcut number 4 (auto-renew on/off) to make it permanent again') }
+    # Auto-renew was retired on 2026-10-09 by the user: continuously re-spawning a Windows runner is
+    # "Actions used as a free VPS", the one shape GitHub suspends accounts for, and this box is only
+    # powered on occasionally. Say plainly that the machine has an end time instead of implying it
+    # stays up forever -- double-click shortcut 1 (or -Cmd start) when you want another one.
+    Write-Host ('lapses     ' + $s.ends + '   auto-renew is removed on purpose; start a new machine when you need one')
     # rdp.ps1 starts the bridge if none is listening, pre-answers the unknown-publisher warning and
     # opens mstsc itself. The password is deliberately not echoed.
-    if ($script:NOGUI) { Write-Host 'mstsc      not opened (auto-renew run)'; return }
+    if ($script:NOGUI) { Write-Host 'mstsc      not opened (no-gui run)'; return }
     Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $client) -WindowStyle Hidden
 }
 if ($Cmd -eq 'rdp') { Invoke-Rdp $null; exit }
@@ -245,11 +244,11 @@ if ($Cmd -eq 'stop') {
     & cmdkey.exe ('/delete:TERMSRV/' + 'rdp.kun9.ccwu.cc') 2>&1 | Out-Null
     & cmdkey.exe '/delete:termsrv:localhost:13389' 2>&1 | Out-Null
     Write-Host 'saved RDP credential removed'
-    # otherwise the renewer sees "no runner alive" five minutes later and hands you a brand new
-    # machine you did not ask for -- which looks exactly like the stop button not working.
+    # A computer still running an OLD kit may have the timer armed; stopping must leave nothing behind,
+    # otherwise the machine comes back five minutes later and the stop button looks broken.
     if (Get-ScheduledTask -TaskName 'kun9_wt_renew' -EA SilentlyContinue) {
         Unregister-ScheduledTask -TaskName 'kun9_wt_renew' -Confirm:$false
-        Write-Host 'auto-renew turned OFF as well  (double-click the 4th shortcut in Desktop\github xuniji to turn it back on)'
+        Write-Host 'auto-renew task removed as well  (the feature itself was retired on 2026-10-09)'
     }
     exit
 }
@@ -334,16 +333,13 @@ Show $hit (Unseal $hit.cipher)
 # This runs BEFORE the ttyd probe on purpose -- that probe retries a Cloudflare DNS publish for up to
 # five minutes, and there is no reason for the Remote Desktop window to wait behind it.
 Invoke-Rdp $hit
-if (-not $script:NOGUI) { Probe $hit (Unseal $hit.cipher) } else { Write-Host 'probe      ttyd probe skipped (auto-renew)' }
+if (-not $script:NOGUI) { Probe $hit (Unseal $hit.cipher) } else { Write-Host 'probe      ttyd probe skipped (no-gui run)' }
 
-# Only -Cmd stop un-arms the renewer, and -Cmd start never re-armed it -- so a machine started after a
-# stop ran on borrowed time and vanished at the 6 h cap with nothing on screen explaining why (that is
-# exactly how the address died twice on 2026-10-06). Asking for a machine is asking for one that stays,
-# so arm the timer again here. -Cmd stop still means stop: it turns this back off.
-if (-not (Get-ScheduledTask -TaskName 'kun9_wt_renew' -EA SilentlyContinue)) {
-    $rn = Join-Path $PSScriptRoot '_renew.ps1'
-    if (Test-Path $rn) {
-        $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        & $ps -NoProfile -ExecutionPolicy Bypass -File $rn -Toggle 2>&1 | ForEach-Object { Write-Host ('' + $_) }
-    } else { Write-Host 'renew    CANNOT arm, _renew.ps1 is not next to this script' }
+# Auto-renew is retired (2026-10-09, user order): a box that re-spawns a Windows runner every 6 h is
+# "Actions as a free VPS", which is the shape GitHub's ToS suspends accounts for, and this computer is
+# only powered on occasionally. -Cmd start must therefore NEVER arm a timer again -- and it removes a
+# leftover one from an older kit, so an already-armed computer self-heals the moment it is used.
+if (Get-ScheduledTask -TaskName 'kun9_wt_renew' -EA SilentlyContinue) {
+    Unregister-ScheduledTask -TaskName 'kun9_wt_renew' -Confirm:$false
+    Write-Host 'renew    kun9_wt_renew unregistered (feature removed, the machine now simply ends at the cap)'
 }
