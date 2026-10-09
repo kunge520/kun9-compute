@@ -31,8 +31,7 @@ $Mx  = 'https://ch.kun9.ccwu.cc/mxd/'
 # local name -> repo file, relay file, pinned sha1 ('' = nothing pinned yet)
 $Pin = @{
     'rdp.ps1'      = @{ gh = 'rdp.ps1';     mx = 'rig_rdp.txt';        sha = 'f6aa05e9ad5aab01a826d3ffc997cfcf12731869' }
-    '_winterm.ps1' = @{ gh = 'winterm.ps1'; mx = 'rig_gh_winterm.txt'; sha = '47f9c25e91cb09c5580b2e15b7cb39d272f58f46' }
-    '_renew.ps1'   = @{ gh = 'renew.ps1';   mx = 'rig_gh_renew.txt';   sha = 'db7b93ce54417f19166e2a1ebfe98d7278e418a0' }
+    '_winterm.ps1' = @{ gh = 'winterm.ps1'; mx = 'rig_gh_winterm.txt'; sha = '0752df5f94cb555884d04dd9bb40747c40c08b40' }
 }
 
 $tool = Join-Path $env:LOCALAPPDATA 'gh_tools'
@@ -134,7 +133,7 @@ if ($Rdp) {
 # ------------------------------------------------------------------ full install
 Write-Host '== scripts =='
 $got = @{}
-foreach ($n in @('rdp.ps1', '_winterm.ps1', '_renew.ps1')) { $got[$n] = Place $n $tool }
+foreach ($n in @('rdp.ps1', '_winterm.ps1')) { $got[$n] = Place $n $tool }
 
 # rdp.ps1 must also sit where the logon task looks for it
 $src = Join-Path $tool 'rdp.ps1'
@@ -173,13 +172,11 @@ Write-Host '== buttons =='
 if (-not $Dir) { $Dir = if ($PSScriptRoot) { $PSScriptRoot } else { [Environment]::GetFolderPath('Desktop') } }
 $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $wm = Join-Path $tool '_winterm.ps1'
-$rn = Join-Path $tool '_renew.ps1'
 $sh = New-Object -ComObject WScript.Shell
 $items = @(
-    @{ n = '1-开一台新的虚拟机.lnk'; t = $wm; a = ('-NoProfile -ExecutionPolicy Bypass -NoExit -File "' + $wm + '" -Cmd start -Minutes 350'); d = '开一台新的 GitHub Windows 虚拟机，起来后自动弹出远程桌面。一般 3-8 分钟，排队久时十几分钟。' },
+    @{ n = '1-开一台新的虚拟机.lnk'; t = $wm; a = ('-NoProfile -ExecutionPolicy Bypass -NoExit -File "' + $wm + '" -Cmd start -Minutes 350'); d = '开一台新的 GitHub Windows 虚拟机，起来后自动弹出远程桌面。一般 3-8 分钟，排队久时十几分钟。最长 6 小时，到点自己结束。' },
     @{ n = '2-连上去-远程桌面.lnk'; t = $wm; a = ('-NoProfile -ExecutionPolicy Bypass -NoExit -File "' + $wm + '" -Cmd rdp'); d = '连现在这台：检查隧道和虚拟机状态，然后打开远程桌面。' },
-    @{ n = '3-停止这台虚拟机.lnk'; t = $wm; a = ('-NoProfile -ExecutionPolicy Bypass -NoExit -File "' + $wm + '" -Cmd stop'); d = '立刻停掉当前虚拟机（取消 GitHub 上的任务），清掉保存的登录信息，并关掉自动续机。' },
-    @{ n = '4-自动续机-开或关.lnk'; t = $rn; a = ('-NoProfile -ExecutionPolicy Bypass -NoExit -File "' + $rn + '" -Toggle'); d = '自动续机开关：开着的话，到期前 30 分钟自动换一台新的，地址账号密码都不变。' }
+    @{ n = '3-停止这台虚拟机.lnk'; t = $wm; a = ('-NoProfile -ExecutionPolicy Bypass -NoExit -File "' + $wm + '" -Cmd stop'); d = '立刻停掉当前虚拟机（取消 GitHub 上的任务），并清掉保存的登录信息。' }
 )
 foreach ($i in $items) {
     $p = Join-Path $Dir $i.n
@@ -193,16 +190,22 @@ foreach ($i in $items) {
     Write-Host ('lnk    ' + $i.n)
 }
 
-Write-Host '== auto-renew =='
-# A fresh computer has no timer at all, and a machine nobody renews dies at the 6 h mark. -Toggle would
-# flip a switch that is already on, so it is only called when the task does not exist.
-$have = @(Get-ScheduledTask -TaskName 'kun9_wt_renew' -EA SilentlyContinue).Count
-if ($have -ge 1) { Write-Host 'task   kun9_wt_renew already installed, untouched' }
-elseif (Test-Path $rn) {
-    & $ps -NoProfile -ExecutionPolicy Bypass -File $rn -Toggle 2>&1 | ForEach-Object { Write-Host (A $_) }
-} else { Write-Host 'task   cannot arm, _renew.ps1 missing' }
-
-Write-Host '== check =='
-& $ps -NoProfile -ExecutionPolicy Bypass -File $rn -Status 2>&1 | ForEach-Object { Write-Host (A $_) }
+Write-Host '== remove auto-renew =='
+# 自动续机（到期前自动换一台）在 2026-10-09 按用户要求彻底删除：每 6 小时不断重开一台 Windows
+# runner 就是"把 Actions 当免费 VPS"，这正是 GitHub 会封号的那一类用法；而这台机器只是偶尔开机。
+# 这里不只跳过安装，还要把旧版本 kit 装好的东西清掉，所以任何一台装过旧 kit 的电脑跑一次本脚本
+# 就自愈：任务注销、_renew.ps1 删除、第 4 个按钮删除。
+$old = @(Get-ScheduledTask -TaskName 'kun9_wt_renew' -EA SilentlyContinue)
+if ($old.Count -ge 1) {
+    try { Unregister-ScheduledTask -TaskName 'kun9_wt_renew' -Confirm:$false; Write-Host 'task   kun9_wt_renew unregistered' }
+    catch { Write-Host ('task   CANNOT unregister kun9_wt_renew: ' + $_.Exception.Message) }
+} else { Write-Host 'task   kun9_wt_renew not present (correct)' }
+foreach ($f in @((Join-Path $tool '_renew.ps1'), (Join-Path $Dir '4-自动续机-开或关.lnk'))) {
+    if (Test-Path $f) {
+        try { Remove-Item $f -Force; Write-Host ('gone   ' + $f) }
+        catch { Write-Host ('keep   could not delete ' + $f + ': ' + $_.Exception.Message) }
+    }
+}
+Write-Host 'note   虚拟机到 6 小时上限会自己结束，地址不变；要用就再点一次 1-开一台新的虚拟机'
 Write-Host ('done   buttons written to ' + $Dir)
 if (-not $NoPause) { Read-Host 'Press Enter to close' | Out-Null }
