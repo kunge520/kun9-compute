@@ -7,8 +7,9 @@
 #
 # The source is fetched from raw.githubusercontent rather than the live Worker, because reading the
 # deployed script back returns a multipart envelope whose Content-Disposition line is not JS.
+# Pass a file as $1 to deploy that copy instead (raw caches by path for a minute after a push).
 #
-# Requires: bash, curl, openssl. Run: bash vmctl/deploy.sh
+# Requires: bash, curl, openssl. Run: bash vmctl/deploy.sh [source.js]
 set -u
 REPO=kunge520/kun9-compute
 WORKER=vm-ctl
@@ -17,12 +18,19 @@ CDATE=2026-10-01
 HERE=$(cd "$(dirname "$0")" && pwd)
 SECRETS="$HOME/Desktop/密钥.txt"
 KEYFILE="$HERE/../密钥-换电脑拷走/console_key.txt"
+[ -f "$KEYFILE" ] || KEYFILE="$HOME/Desktop/github xuniji/密钥-换电脑拷走/console_key.txt"
 [ -f "$SECRETS" ] || { echo "缺少 $SECRETS（Cloudflare API token 第 9 行、account id 第 5 行）"; exit 1; }
 [ -f "$KEYFILE" ] || { echo "缺少 $KEYFILE（面板口令）"; exit 1; }
 
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 umask 077
-curl -sSfL "https://raw.githubusercontent.com/$REPO/main/vmctl/vm-ctl.worker.js" -o "$D/vm-ctl.worker.js" || { echo "拉取源码失败"; exit 1; }
+SRC="${1:-}"
+if [ -n "$SRC" ]; then
+  [ -f "$SRC" ] || { echo "找不到源码 $SRC"; exit 1; }
+  cp "$SRC" "$D/vm-ctl.worker.js" || exit 1
+else
+  curl -sSfL "https://raw.githubusercontent.com/$REPO/main/vmctl/vm-ctl.worker.js" -o "$D/vm-ctl.worker.js" || { echo "拉取源码失败"; exit 1; }
+fi
 grep -q 'export default' "$D/vm-ctl.worker.js" || { echo "源码不对（没有 export default），取消部署"; exit 1; }
 echo "source=$(wc -c < "$D/vm-ctl.worker.js") bytes"
 
