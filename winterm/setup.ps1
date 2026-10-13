@@ -1,7 +1,7 @@
 ﻿param(
-    # only set up the RDP bridge on this computer (this is what the one-line paste runs). No buttons,
-    # no keys, no GitHub token needed.
-    [switch]$Rdp,
+    # only set up the browser console on this computer (this is what the one-line paste runs): install
+    # the controller, then open the console URL in the default browser. No buttons, no keys.
+    [switch]$Console,
     # where the four buttons are written; defaults to the folder this file sits in
     [string]$Dir = '',
     # accept a download whose SHA1 is not the pinned one -- only for when a newer version has been
@@ -31,8 +31,7 @@ $Mx  = 'https://ch.kun9.ccwu.cc/mxd/'
 
 # local name -> repo file, relay file, pinned sha1 ('' = nothing pinned yet)
 $Pin = @{
-    'rdp.ps1'      = @{ gh = 'rdp.ps1';     mx = 'rig_rdp.txt';        sha = 'e508802d37ed93d988dc14a0b5f06ed8a8a9ae64' }
-    '_winterm.ps1' = @{ gh = 'winterm.ps1'; mx = 'rig_gh_winterm.txt'; sha = 'bca93514fd52acbc9c2afdb471762764b49c7acc' }
+    '_winterm.ps1' = @{ gh = 'winterm.ps1'; mx = 'rig_gh_winterm.txt'; sha = '82df7c95e41cafbaad9c9c74a3a880e01e79dca3' }
 }
 
 $tool = Join-Path $env:LOCALAPPDATA 'gh_tools'
@@ -123,48 +122,23 @@ function Place([string]$name, [string]$dstDir) {
     return $true
 }
 
-# ------------------------------------------------------------------ RDP only
-if ($Rdp) {
-    if (-not (Test-Path $rdpDir)) { New-Item -ItemType Directory -Path $rdpDir -Force | Out-Null }
-    $dst = Join-Path $rdpDir 'rdp.ps1'
-    if (-not (NearPinned 'rdp.ps1' $dst)) {
-        $r = Fetch 'rdp.ps1' $dst
-        if ($r) {
-            Write-Host ('got    rdp.ps1  ' + $r.bytes + ' B  from ' + $r.src + '  sha1=' + $r.sha.Substring(0, 12))
-        } else {
-            # All three sources dead (or this computer has no route to GitHub at all). The packed folder
-            # carries an offline copy of the same file, so use it instead of telling the user to copy by hand.
-            $near = $null
-            if ($PSScriptRoot) { $c = Join-Path $PSScriptRoot 'rdp.ps1'; if (Test-Path $c) { $near = $c } }
-            if (-not $near) {
-                Write-Host 'FAIL   rdp.ps1 could not be downloaded from jsdelivr, github-raw or the relay.'
-                Write-Host '       Put rdp.ps1 here by hand (from the packed folder) and double-click it.'
-                if (-not $NoPause) { Read-Host 'Press Enter' | Out-Null }
-                exit 1
-            }
-            Copy-Item $near $dst -Force
-            Write-Host ('got    rdp.ps1  ' + (Get-Item $dst).Length + ' B  from the copy next to this script  sha1=' + (Sha1 $dst).Substring(0, 12))
-        }
+# ------------------------------------------------------------------ console only
+if ($Console) {
+    $dst = Join-Path $tool '_winterm.ps1'
+    if (-not (Place '_winterm.ps1' $tool)) {
+        Write-Host 'FAIL   _winterm.ps1 could not be downloaded from jsdelivr, github-raw or the relay.'
+        Write-Host '       Copy the whole packed folder to this computer and double-click 2-打开网页控制台.cmd.'
+        if (-not $NoPause) { Read-Host 'Press Enter' | Out-Null }
+        exit 1
     }
     Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-    & $dst
+    & $dst -Cmd console
     exit $LASTEXITCODE
 }
 
 # ------------------------------------------------------------------ full install
 Write-Host '== scripts =='
-$got = @{}
-foreach ($n in @('rdp.ps1', '_winterm.ps1')) { $got[$n] = Place $n $tool }
-
-# rdp.ps1 must also sit where the logon task looks for it
-$src = Join-Path $tool 'rdp.ps1'
-if (Test-Path $src) {
-    if (-not (Test-Path $rdpDir)) { New-Item -ItemType Directory -Path $rdpDir -Force | Out-Null }
-    $d2 = Join-Path $rdpDir 'rdp.ps1'
-    if (-not (Test-Path $d2) -or (Sha1 $src) -ne (Sha1 $d2)) {
-        Copy-Item $src $d2 -Force; Write-Host 'sync   kun9_rdp\rdp.ps1'
-    } else { Write-Host 'sync   kun9_rdp\rdp.ps1 already same' }
-}
+foreach ($n in @('_winterm.ps1')) { Place $n $tool | Out-Null }
 
 Write-Host '== keys =='
 # These four cannot live in the cloud: pat.txt IS the GitHub token and wt_priv.xml unseals every
@@ -219,7 +193,7 @@ if ($NoButtons) { Write-Host 'skip   the three buttons were not rewritten (-NoBu
 else {
     $items = @(
         @{ n = '1-开一台新的虚拟机.cmd'; a = '-Cmd start -Minutes 350' },
-        @{ n = '2-连上去-远程桌面.cmd'; a = '-Cmd rdp' },
+        @{ n = '2-打开网页控制台.cmd'; a = '-Cmd console' },
         @{ n = '3-停止这台虚拟机.cmd'; a = '-Cmd stop' }
     )
     foreach ($i in $items) {
@@ -234,6 +208,46 @@ else {
         if (Test-Path $old) { Remove-Item $old -Force; Write-Host ('gone   ' + [IO.Path]::GetFileName($old)) }
     }
 }
+
+Write-Host '== remove local RDP bridge =='
+# 2026-10-14：虚拟机不再开远程桌面，本机也就不需要那个 WebSocket 翻译器了。旧 kit 装过的东西在这里
+# 一律清掉：gh_tools\rdp.ps1、%LOCALAPPDATA%\kun9_rdp\、登录自启任务 kun9_rdp_bridge、启动文件夹和
+# 开始菜单的快捷方式、hosts 里给 rdp./wtedge. 写的钉值，以及还挂在 13389 上的转发进程。
+# hosts 只有管理员改得动；改不动就把要删的行打印出来，脚本自己不提 UAC。
+foreach ($f in @((Join-Path $tool 'rdp.ps1'), (Join-Path $tool 'rdp.push.ps1'))) {
+    if (Test-Path $f) { try { Remove-Item $f -Force; Write-Host ('gone   ' + $f) } catch { Write-Host ('keep   could not delete ' + $f) } }
+}
+foreach ($pid13 in @(Get-NetTCPConnection -LocalPort 13389 -State Listen -EA SilentlyContinue | ForEach-Object { $_.OwningProcess } | Select-Object -Unique)) {
+    try { Stop-Process -Id $pid13 -Force; Write-Host ('kill   bridge process ' + $pid13 + ' off 13389') }
+    catch { Write-Host ('keep   could not stop pid ' + $pid13 + ': ' + $_.Exception.Message) }
+}
+if (Test-Path $rdpDir) {
+    try { Remove-Item $rdpDir -Recurse -Force; Write-Host ('gone   ' + $rdpDir) }
+    catch { Write-Host ('keep   could not delete ' + $rdpDir + ': ' + $_.Exception.Message) }
+}
+if ( @(Get-ScheduledTask -TaskName 'kun9_rdp_bridge' -EA SilentlyContinue).Count -ge 1 ) {
+    try { Unregister-ScheduledTask -TaskName 'kun9_rdp_bridge' -Confirm:$false; Write-Host 'task   kun9_rdp_bridge unregistered' }
+    catch { Write-Host ('task   CANNOT unregister kun9_rdp_bridge: ' + $_.Exception.Message) }
+} else { Write-Host 'task   kun9_rdp_bridge not present (correct)' }
+foreach ($lnk in @((Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\kun9-bridge.lnk'),
+                   (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\远程桌面-kun9.lnk'),
+                   (Join-Path $env:APPDATA '「开始」菜单\Programs\启动\kun9-bridge.lnk'),
+                   (Join-Path $env:APPDATA '「开始」菜单\Programs\远程桌面-kun9.lnk'),
+                   (Join-Path $Dir '2-连上去-远程桌面.cmd'), (Join-Path $Dir '2-连上去-远程桌面.lnk'))) {
+    if (Test-Path $lnk) { try { Remove-Item $lnk -Force; Write-Host ('gone   ' + $lnk) } catch { Write-Host ('keep   could not delete ' + $lnk) } }
+}
+$hostsFile = Join-Path $env:WINDIR 'System32\drivers\etc\hosts'
+$pins = @(Get-Content $hostsFile -Raw -EA SilentlyContinue) -split "`r?`n" | Where-Object { $_ -match 'rdp\.kun9\.ccwu\.cc|wtedge\.kun9\.ccwu\.cc' }
+if ($pins.Count -ge 1) {
+    try {
+        $keep = @(Get-Content $hostsFile -EA SilentlyContinue | Where-Object { $_ -notmatch 'rdp\.kun9\.ccwu\.cc|wtedge\.kun9\.ccwu\.cc' })
+        Set-Content -Path $hostsFile -Value $keep -Encoding ascii -EA Stop
+        Write-Host ('hosts  ' + $pins.Count + ' 行钉值已删除，远程桌面现在走不到任何本地端口')
+    } catch {
+        Write-Host 'hosts  要管理员才改得动，请手工删掉下面这几行：'
+        foreach ($x in $pins) { Write-Host ('       ' + "$x".Trim()) }
+    }
+} else { Write-Host 'hosts  no kun9 pins (correct)' }
 
 Write-Host '== remove auto-renew =='
 # 自动续机（到期前自动换一台）在 2026-10-09 按用户要求彻底删除：每 6 小时不断重开一台 Windows
