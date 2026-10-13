@@ -86,10 +86,28 @@ function Fetch([string]$name, [string]$dst) {
     return $null
 }
 
+function NearPinned([string]$name, [string]$dst) {
+    # The packed folder carries offline copies of these scripts. When the one sitting next to this
+    # script has exactly the SHA1 this script pins, it IS the version I shipped, so use it and skip the
+    # download -- jsDelivr keeps serving the previous bytes for minutes after a release (measured again
+    # 2026-10-13: purge answered status=finished, the CDN still returned the old file), which otherwise
+    # installs a stale script onto the computer that was just carried the fix in.
+    $p = $Pin[$name]
+    if (-not ($PSScriptRoot -and $p -and $p.sha)) { return $false }
+    $c = Join-Path $PSScriptRoot $name
+    if (-not (Test-Path $c)) { return $false }
+    if ((Sha1 $c) -ne $p.sha) { return $false }
+    if ((Test-Path $dst) -and ((Sha1 $dst) -eq $p.sha)) { Write-Host ('ok     ' + $name + '  already the pinned version'); return $true }
+    Copy-Item $c $dst -Force
+    Write-Host ('inst   ' + $name + '  from this folder -- it matches the pin, no download needed')
+    return $true
+}
+
 function Place([string]$name, [string]$dstDir) {
     $dst = Join-Path $dstDir $name
     $near = $null
     if ($PSScriptRoot) { $c = Join-Path $PSScriptRoot $name; if (Test-Path $c) { $near = $c } }
+    if (NearPinned $name $dst) { return $true }
     if ($Force -or -not (Test-Path $dst)) {
         $r = Fetch $name $dst
         if ($r) { Write-Host ('inst   ' + $name + '  ' + $r.bytes + ' B  ' + $r.src + '  sha1=' + $r.sha.Substring(0, 12)); return $true }
@@ -109,22 +127,24 @@ function Place([string]$name, [string]$dstDir) {
 if ($Rdp) {
     if (-not (Test-Path $rdpDir)) { New-Item -ItemType Directory -Path $rdpDir -Force | Out-Null }
     $dst = Join-Path $rdpDir 'rdp.ps1'
-    $r = Fetch 'rdp.ps1' $dst
-    if ($r) {
-        Write-Host ('got    rdp.ps1  ' + $r.bytes + ' B  from ' + $r.src + '  sha1=' + $r.sha.Substring(0, 12))
-    } else {
-        # All three sources dead (or this computer has no route to GitHub at all). The packed folder
-        # carries an offline copy of the same file, so use it instead of telling the user to copy by hand.
-        $near = $null
-        if ($PSScriptRoot) { $c = Join-Path $PSScriptRoot 'rdp.ps1'; if (Test-Path $c) { $near = $c } }
-        if (-not $near) {
-            Write-Host 'FAIL   rdp.ps1 could not be downloaded from jsdelivr, github-raw or the relay.'
-            Write-Host '       Put rdp.ps1 here by hand (from the packed folder) and double-click it.'
-            if (-not $NoPause) { Read-Host 'Press Enter' | Out-Null }
-            exit 1
+    if (-not (NearPinned 'rdp.ps1' $dst)) {
+        $r = Fetch 'rdp.ps1' $dst
+        if ($r) {
+            Write-Host ('got    rdp.ps1  ' + $r.bytes + ' B  from ' + $r.src + '  sha1=' + $r.sha.Substring(0, 12))
+        } else {
+            # All three sources dead (or this computer has no route to GitHub at all). The packed folder
+            # carries an offline copy of the same file, so use it instead of telling the user to copy by hand.
+            $near = $null
+            if ($PSScriptRoot) { $c = Join-Path $PSScriptRoot 'rdp.ps1'; if (Test-Path $c) { $near = $c } }
+            if (-not $near) {
+                Write-Host 'FAIL   rdp.ps1 could not be downloaded from jsdelivr, github-raw or the relay.'
+                Write-Host '       Put rdp.ps1 here by hand (from the packed folder) and double-click it.'
+                if (-not $NoPause) { Read-Host 'Press Enter' | Out-Null }
+                exit 1
+            }
+            Copy-Item $near $dst -Force
+            Write-Host ('got    rdp.ps1  ' + (Get-Item $dst).Length + ' B  from the copy next to this script  sha1=' + (Sha1 $dst).Substring(0, 12))
         }
-        Copy-Item $near $dst -Force
-        Write-Host ('got    rdp.ps1  ' + (Get-Item $dst).Length + ' B  from the copy next to this script  sha1=' + (Sha1 $dst).Substring(0, 12))
     }
     Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
     & $dst
