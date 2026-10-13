@@ -48,7 +48,10 @@ if (-not $Bridge -and -not $OnlyHosts) {
             $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnkPath)
             $sc.TargetPath = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
             $sc.Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $dst + '"'
-            $sc.IconLocation = (Join-Path $env:WINDIR 'System32\mstsc.exe,0')
+            $ico = Join-Path $env:WINDIR 'System32\mstsc.exe'
+            if (-not (Test-Path $ico)) { $ico = Join-Path $env:ProgramFiles 'Remote Desktop\msrdc.exe' }
+            if (-not (Test-Path $ico)) { $ico = (Join-Path $env:WINDIR 'explorer.exe') }
+            $sc.IconLocation = ($ico + ',0')
             $sc.Description = $cn + ' ' + $Domain
             $sc.Save()
         } catch { }
@@ -94,6 +97,7 @@ function ListeningPort {
 if ($Stop) {
     foreach ($bp in BridgeProcs) { try { Stop-Process -Id $bp.ProcessId -Force -EA SilentlyContinue } catch { } }
     & schtasks.exe /delete /tn kun9_rdp_bridge /f 2>&1 | Out-Null
+    Remove-Item (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\kun9-bridge.lnk') -Force -EA SilentlyContinue
     L 'stopped'
     Write-Host ('bridge stopped, procs left=' + (@(BridgeProcs).Count))
     exit 0
@@ -267,18 +271,35 @@ if ($lp -le 0) {
 $addr = if ($hostsOk) { $Domain + ':' + $lp } else { '127.0.0.1:' + $lp }
 # The bridge is a detached hidden process, so it survives this window closing but not a reboot. Leave a
 # per-user logon task behind as well -- that is what makes the paste a genuinely one-time thing. A
-# Limited/Interactive task under one's own account needs no elevation, and if the box still refuses, the
-# Start-menu entry above covers the same ground by hand.
-try {
-    if (-not (Get-ScheduledTask -TaskName 'kun9_rdp_bridge' -EA SilentlyContinue)) {
-        $argl = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $dst + '" -Bridge -Port ' + $lp
+# Limited/Interactive task under one's own account usually needs no elevation, but some builds refuse it
+# (0x80070005 here), so the fallback is the per-user Startup folder, which never requires elevation.
+$argl = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $dst + '" -Bridge -Port ' + $lp
+$armed = [bool](Get-ScheduledTask -TaskName 'kun9_rdp_bridge' -EA SilentlyContinue)
+if (-not $armed) {
+    try {
         $act = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument $argl
         $tri = New-ScheduledTaskTrigger -AtLogOn
         $sts = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable
-        Register-ScheduledTask -TaskName 'kun9_rdp_bridge' -Action $act -Trigger $tri -Settings $sts | Out-Null
-        L 'logon task registered'
-    }
-} catch { L ('logon task failed ' + (($_.Exception.Message) -split "`r?`n")[0]) }
+        # -ErrorAction Stop matters: the denial on this build arrives as a non-terminating CIM error, so
+        # without it the register line "succeeds", no catch runs, and the log lies about the task.
+        Register-ScheduledTask -TaskName 'kun9_rdp_bridge' -Action $act -Trigger $tri -Settings $sts -ErrorAction Stop | Out-Null
+        $armed = [bool](Get-ScheduledTask -TaskName 'kun9_rdp_bridge' -EA SilentlyContinue)
+        if ($armed) { L 'logon task registered' }
+    } catch { L ('logon task failed ' + (($_.Exception.Message) -split "`r?`n")[0]) }
+}
+if (-not $armed) {
+    try {
+        $sl = Join-Path (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup') 'kun9-bridge.lnk'
+        if (-not (Test-Path $sl)) {
+            $sc2 = (New-Object -ComObject WScript.Shell).CreateShortcut($sl)
+            $sc2.TargetPath = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $sc2.Arguments = $argl
+            $sc2.WindowStyle = 7
+            $sc2.Save()
+        }
+        L 'startup folder entry armed'
+    } catch { L ('startup fallback failed ' + (($_.Exception.Message) -split "`r?`n")[0]) }
+}
 Write-Host ('bridge 127.0.0.1:' + $lp + ' -> ' + $Edge)
 Write-Host ('remote desktop target: ' + $addr + '   (account: administrator)')
 L ('client launched target=' + $addr)
@@ -317,6 +338,18 @@ if (-not $NoMstsc) {
     'redirectclipboard:i:1',
     'smart sizing:i:1'
 ) | Set-Content -Path $rdp -Encoding ascii
-    Start-Process mstsc.exe -ArgumentList ('"' + $rdp + '"')
+    # Some builds of Windows (this one, 26100/26300) ship no mstsc.exe in System32 at all -- only the
+    # mstscax.dll. The winget package Microsoft.RemoteDesktopClient puts the same-UI client under
+    # Program Files as msrdc.exe, and it takes this .rdp file with the same arguments, so try both.
+    $cli = @((Join-Path $env:WINDIR 'System32\mstsc.exe'), (Join-Path $env:ProgramFiles 'Remote Desktop\msrdc.exe'),
+             (Join-Path ${env:ProgramFiles(x86)} 'Remote Desktop\msrdc.exe')) |
+           Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+    if (-not $cli) {
+        Write-Host 'no Remote Desktop client on this computer. Paste this once, then run me again:'
+        Write-Host '  winget install --id Microsoft.RemoteDesktopClient --accept-package-agreements'
+        exit 1
+    }
+    L ('client ' + $cli)
+    Start-Process $cli -ArgumentList ('"' + $rdp + '"')
 }
 exit 0
