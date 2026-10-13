@@ -287,20 +287,30 @@ async function status(env) {
       named: s.named || '',
       run_id: s.run_id || '',
       restarts: mine ? s.restarts : 0,
+      origin: mine ? String(s.origin_http || '') : '',
       ttl_min: s.ttl_min,
       closed: s.closed || '',
     };
   }
   out.queue = await read(env, 'power');
-  // While a run is still live, trust the terminal over the five-minute-old heartbeat file: the
-  // machine can be serving for minutes before session.json reaches the panel, and a greyed-out
-  // 打开终端 in that window reads as "ttyd 连不上".
-  if (r && r.live && !(out.vm && out.vm.alive === true) && (await originLive())) {
-    const v = out.vm || {};
+  // The heartbeat is written before the terminal is listening, and a machine whose ttyd died keeps
+  // reporting alive, so neither of them is proof on its own. 401 out there is: it means something
+  // is really serving the browser terminal. A record that already says 401 is not asked twice.
+  const v = out.vm;
+  let probed = null;
+  const ask = async () => { if (probed === null) probed = await originLive(); return probed; };
+  if (v && v.alive === true && !/^(401|200|302)$/.test(v.origin) && !(await ask())) {
+    v.alive = false;
+    v.note = '机器在跑，终端还没就绪：' + (v.note || '');
+  }
+  // And the mirror case, which is what actually read as "ttyd 连不上": the box has been serving for
+  // minutes while the five-minute-old file still says it is not up, so 打开终端 sits greyed out.
+  if (!(v && v.alive === true) && r && r.live && (await ask())) {
+    const g = v || {};
     out.vm = {
-      alive: true, url: TTYD, user: v.user || 'administrator', ends: v.ends || '', check: v.check || '',
-      note: '终端已经起来了，心跳文件还在路上', named: v.named || '', run_id: r.live,
-      restarts: v.restarts || 0, closed: '',
+      alive: true, url: TTYD, user: g.user || 'administrator', ends: g.ends || '', check: g.check || '',
+      note: '终端已经就绪，心跳文件还在路上', named: g.named || '', run_id: r.live,
+      restarts: g.restarts || 0, origin: '401', closed: '',
     };
   }
   return out;
