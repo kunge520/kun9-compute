@@ -114,10 +114,12 @@ function Probe($s, $pass) {
         $pin = @()
         if ($ip -match '^\d+\.\d+\.\d+\.\d+$') { $pin = @('--resolve', ($hname + ':443:' + $ip)) }
         $a = @('-4', '-sS', '--ssl-no-revoke', '-m', '30') + $pin + @('-o', 'NUL', '-w', '%{http_code}', ($s.url + '/'))
-        $no = (& curl.exe @a 2>$null) -join ''
+        # curl writes its own diagnostics to stderr, and under ErrorActionPreference=Stop an error
+        # record there aborts the whole status run -- which then looks like 'session.json is broken'.
+        $no = try { (& curl.exe @a 2>$null) -join '' } catch { 'curl-failed' }
         if ($no -match '^[1-5]\d\d$') {
             $b = @('-4', '-sS', '--ssl-no-revoke', '-m', '30') + $pin + @('-u', ($s.user + ':' + $pass), '-o', $f, '-w', '%{http_code} %{time_total}s %{size_download}B', ($s.url + '/'))
-            $with = (& curl.exe @b 2>$null) -join ''
+            $with = try { (& curl.exe @b 2>$null) -join '' } catch { 'curl-failed' }
             if (Test-Path $f) { $html = Get-Content $f -Raw; Remove-Item $f -Force }
             break
         }
@@ -195,14 +197,20 @@ function Invoke-Rdp($preset) {
     Write-Host ('tailscale  ' + $mystate.Substring(0, [Math]::Min(160, $mystate.Length)))
 
     # say it here rather than letting mstsc open a window that then spins: no route = no tailnet login,
-    # a stale key = the VM half of the pair is down
+    # a stale key = the VM half of the pair is down. The SYN itself wakes the peer, but a box that just
+    # joined the tailnet needs its first path negotiated, so retry -- one 8-second probe used to report
+    # 'no route' on a machine that was perfectly reachable a second later.
     $ok = $false
-    try {
-        $tc = New-Object Net.Sockets.TcpClient
-        $ar = $tc.BeginConnect($s.ts_ip, 3389, $null, $null)
-        $ok = $ar.AsyncWaitHandle.WaitOne(8000) -and $tc.Connected
-        $tc.Close()
-    } catch { }
+    for ($t = 1; $t -le 3; $t++) {
+        try {
+            $tc = New-Object Net.Sockets.TcpClient
+            $ar = $tc.BeginConnect($s.ts_ip, 3389, $null, $null)
+            $ok = $ar.AsyncWaitHandle.WaitOne(8000) -and $tc.Connected
+            $tc.Close()
+        } catch { }
+        if ($ok) { break }
+        Write-Host ('  ' + $s.ts_ip + ':3389 not answering yet (try ' + $t + '/3)')
+    }
     if (-not $ok) {
         Write-Host ('cannot reach ' + $s.ts_ip + ':3389 from this computer.')
         Write-Host '  this box: run  & $ts up   (or open the Tailscale tray icon and sign in to the same tailnet)'
@@ -219,8 +227,8 @@ function Invoke-Rdp($preset) {
     # stays up forever -- double-click shortcut 1 (or -Cmd start) when you want another one.
     Write-Host ('lapses     ' + $s.ends + '   auto-renew is removed on purpose; start a new machine when you need one')
     if ($script:NOGUI) { Write-Host 'mstsc      not opened (no-gui run)'; return }
-    # Windows 11 builds after 26100 ship without mstsc.exe, so fall back to the store client, which
-    # takes the same /v: address. A missing client is reported, never installed by us.
+    # Windows 11 builds after 26100 ship without mstsc.exe, so fall back to the store client. A missing
+    # client is reported, never installed by us.
     $cli = @((Join-Path $env:WINDIR 'System32\mstsc.exe'), (Join-Path $env:ProgramFiles 'Remote Desktop\msrdc.exe'),
              (Join-Path ${env:ProgramFiles(x86)} 'Remote Desktop\msrdc.exe')) |
            Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
@@ -229,7 +237,16 @@ function Invoke-Rdp($preset) {
         Write-Host '  winget install --id Microsoft.RemoteDesktopClient --accept-package-agreements'
         exit 1
     }
-    Start-Process -FilePath $cli -ArgumentList @('/v', ($s.ts_ip + ':3389'))
+    # Hand both clients an .rdp file, not a /v: argument. msrdc.exe does not parse /v: the way mstsc
+    # does -- given a bare address it opens its own workspace window and never dials, which looks to the
+    # user like the button did nothing. The password is not in this file: it comes from the cmdkey
+    # entry written above, keyed on the same address.
+    $rdpf = Join-Path $env:TEMP ('kun9_' + ($s.ts_ip -replace '\.', '_') + '.rdp')
+    @(('Full Address:s:' + $s.ts_ip + ':3389'),
+      ('UserName:s:' + $lu),
+      'prompt for credentials:i:0',
+      'authentication level:i:0') -join "`r`n" | Set-Content -Path $rdpf -Encoding ascii
+    Start-Process -FilePath $cli -ArgumentList ('"' + $rdpf + '"')
 }
 if ($Cmd -eq 'rdp') { Invoke-Rdp $null; exit }
 
@@ -239,7 +256,7 @@ if ($Cmd -eq 'status') {
         try {
             $s = $raw | ConvertFrom-Json
             if ($s.alive) { $p = Unseal $s.cipher; Show $s $p; Probe $s $p } else { Write-Host ('dead  closed=' + $s.closed + '  run=' + $s.run_id) }
-        } catch { Write-Host ('unparseable: ' + $raw) }
+        } catch { Write-Host ('status failed: ' + $_.Exception.Message + '  (session.json head: ' + $raw.Substring(0, [Math]::Min(120, $raw.Length)) + ')') }
     } else { Write-Host 'no session.json published' }
     foreach ($r in (@(RunsOf $wf) | Select-Object -First 5)) {
         Write-Host ('#' + $r.run_number + '  ' + $r.created_at + '  ' + $r.status + ' ' + $r.conclusion + '  ' + $r.html_url)
