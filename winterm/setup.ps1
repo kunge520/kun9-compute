@@ -8,6 +8,7 @@
     # shipped and this computer still holds an old copy of this script
     [switch]$Trust,
     [switch]$NoPause,
+    [switch]$NoButtons,
     [switch]$Force
 )
 $ErrorActionPreference = 'Continue'
@@ -30,7 +31,7 @@ $Mx  = 'https://ch.kun9.ccwu.cc/mxd/'
 
 # local name -> repo file, relay file, pinned sha1 ('' = nothing pinned yet)
 $Pin = @{
-    'rdp.ps1'      = @{ gh = 'rdp.ps1';     mx = 'rig_rdp.txt';        sha = 'f6aa05e9ad5aab01a826d3ffc997cfcf12731869' }
+    'rdp.ps1'      = @{ gh = 'rdp.ps1';     mx = 'rig_rdp.txt';        sha = '4e6b137268914dd98bad0031aa9a4e173872db15' }
     '_winterm.ps1' = @{ gh = 'winterm.ps1'; mx = 'rig_gh_winterm.txt'; sha = 'bca93514fd52acbc9c2afdb471762764b49c7acc' }
 }
 
@@ -170,24 +171,45 @@ foreach ($n in $Keys) {
 
 Write-Host '== buttons =='
 if (-not $Dir) { $Dir = if ($PSScriptRoot) { $PSScriptRoot } else { [Environment]::GetFolderPath('Desktop') } }
-$ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$wm = Join-Path $tool '_winterm.ps1'
-$sh = New-Object -ComObject WScript.Shell
-$items = @(
-    @{ n = '1-开一台新的虚拟机.lnk'; t = $wm; a = ('-NoProfile -ExecutionPolicy Bypass -NoExit -File "' + $wm + '" -Cmd start -Minutes 350'); d = '开一台新的 GitHub Windows 虚拟机，起来后自动弹出远程桌面。一般 3-8 分钟，排队久时十几分钟。最长 6 小时，到点自己结束。' },
-    @{ n = '2-连上去-远程桌面.lnk'; t = $wm; a = ('-NoProfile -ExecutionPolicy Bypass -NoExit -File "' + $wm + '" -Cmd rdp'); d = '连现在这台：检查隧道和虚拟机状态，然后打开远程桌面。' },
-    @{ n = '3-停止这台虚拟机.lnk'; t = $wm; a = ('-NoProfile -ExecutionPolicy Bypass -NoExit -File "' + $wm + '" -Cmd stop'); d = '立刻停掉当前虚拟机（取消 GitHub 上的任务），并清掉保存的登录信息。' }
+# A .lnk stores an ABSOLUTE path, which is why copying this folder to another computer (or into another
+# account on it) left the three buttons pointing at C:\Users\<whoever>\AppData\Local\gh_tools and
+# double-clicking did nothing. The buttons are .cmd files now: they find the scripts through
+# %LOCALAPPDATA% and this folder through %~dp0, so the folder can sit anywhere on any account.
+# _run.cmd is the shared worker; on a computer that has never been set up it installs first.
+$launcher = @(
+    '@echo off',
+    'setlocal',
+    'set "TOOL=%LOCALAPPDATA%\gh_tools"',
+    'set "WM=%TOOL%\_winterm.ps1"',
+    'set "PS=%WINDIR%\System32\WindowsPowerShell\v1.0\powershell.exe"',
+    'if not exist "%WM%" (',
+    '  echo first run on this computer -- installing the scripts and the keys, one moment',
+    '  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" -NoPause -NoButtons',
+    ')',
+    'if not exist "%WM%" (',
+    '  echo FAILED: %WM% is still missing. Run setup.ps1 by hand and read what it prints.',
+    '  pause',
+    '  exit /b 1',
+    ')',
+    'start "" "%PS%" -NoProfile -ExecutionPolicy Bypass -NoExit -File "%WM%" %*'
 )
-foreach ($i in $items) {
-    $p = Join-Path $Dir $i.n
-    $l = $sh.CreateShortcut($p)
-    $l.TargetPath = $ps
-    $l.Arguments = $i.a
-    $l.WorkingDirectory = $Dir
-    $l.WindowStyle = 1
-    $l.Description = $i.d
-    $l.Save()
-    Write-Host ('lnk    ' + $i.n)
+Set-Content -Path (Join-Path $Dir '_run.cmd') -Value $launcher -Encoding ascii
+Write-Host 'cmd    _run.cmd'
+if ($NoButtons) { Write-Host 'skip   the three buttons were not rewritten (-NoButtons)' }
+else {
+    $items = @(
+        @{ n = '1-开一台新的虚拟机.cmd'; a = '-Cmd start -Minutes 350' },
+        @{ n = '2-连上去-远程桌面.cmd'; a = '-Cmd rdp' },
+        @{ n = '3-停止这台虚拟机.cmd'; a = '-Cmd stop' }
+    )
+    foreach ($i in $items) {
+        $p = Join-Path $Dir $i.n
+        Set-Content -Path $p -Value @('@echo off', 'call "%~dp0_run.cmd" ' + $i.a) -Encoding ascii
+        Write-Host ('cmd    ' + $i.n)
+        # the old absolute-path shortcut for this button, if a previous kit left one here
+        $old = [IO.Path]::ChangeExtension($p, '.lnk')
+        if (Test-Path $old) { Remove-Item $old -Force; Write-Host ('gone   ' + [IO.Path]::GetFileName($old)) }
+    }
 }
 
 Write-Host '== remove auto-renew =='
