@@ -85,9 +85,7 @@ function Show($s, $pass) {
     if ($s.rdp_url) {
         $rp = ''
         try { $rp = Unseal $s.rdp_cipher } catch { $rp = '(decrypt failed)' }
-        # the address is the tailnet one; rdp_url is just the flag that the listener is up
-        $addr = if ($s.ts_ip) { $s.ts_ip + ':3389' } else { '(no tailnet IP yet: ' + $s.ts_diag + ')' }
-        if ($script:NOGUI) { Write-Host ('rdp        ' + $addr + '   name=' + $s.ts_name + '  user=' + $s.rdp_user + '  pass=(suppressed)') } else { Write-Host ('rdp        ' + $addr + '   name=' + $s.ts_name + '  user=' + $s.rdp_user + '  pass=' + $rp) }
+        if ($script:NOGUI) { Write-Host ('rdp        ' + $s.rdp_url + '   user=' + $s.rdp_user + '  pass=(suppressed)') } else { Write-Host ('rdp        ' + $s.rdp_url + '   user=' + $s.rdp_user + '  pass=' + $rp) }
         Write-Host ('rdp here   powershell -File %LOCALAPPDATA%\gh_tools\_winterm.ps1 -Cmd rdp')
     } elseif ($s.note) { Write-Host ('rdp        not available: ' + $s.note) }
     Write-Host ('cost       public repo = free hosted Windows runner, no minutes charged')
@@ -114,12 +112,10 @@ function Probe($s, $pass) {
         $pin = @()
         if ($ip -match '^\d+\.\d+\.\d+\.\d+$') { $pin = @('--resolve', ($hname + ':443:' + $ip)) }
         $a = @('-4', '-sS', '--ssl-no-revoke', '-m', '30') + $pin + @('-o', 'NUL', '-w', '%{http_code}', ($s.url + '/'))
-        # curl writes its own diagnostics to stderr, and under ErrorActionPreference=Stop an error
-        # record there aborts the whole status run -- which then looks like 'session.json is broken'.
-        $no = try { (& curl.exe @a 2>$null) -join '' } catch { 'curl-failed' }
+        $no = (& curl.exe @a 2>$null) -join ''
         if ($no -match '^[1-5]\d\d$') {
             $b = @('-4', '-sS', '--ssl-no-revoke', '-m', '30') + $pin + @('-u', ($s.user + ':' + $pass), '-o', $f, '-w', '%{http_code} %{time_total}s %{size_download}B', ($s.url + '/'))
-            $with = try { (& curl.exe @b 2>$null) -join '' } catch { 'curl-failed' }
+            $with = (& curl.exe @b 2>$null) -join ''
             if (Test-Path $f) { $html = Get-Content $f -Raw; Remove-Item $f -Force }
             break
         }
@@ -129,56 +125,29 @@ function Probe($s, $pass) {
     Write-Host ('probe      ip=' + $ip + '  no-auth=' + $no + '  with-auth=' + $with + '  ttyd_html=' + [bool]($html -match 'ttyd'))
 }
 
-function Local-Ts {
-    # this box's own tailscale CLI: the tailnet has to be up HERE too, or there is no route to 100.x
-    foreach ($p in @((Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'), (Join-Path $env:LOCALAPPDATA 'Tailscale\tailscale.exe'))) {
-        if (Test-Path $p) { return $p }
-    }
-    return ''
-}
-
 function Invoke-Rdp($preset) {
-    # Remote desktop goes straight to the VM's tailnet address. boot.ps1 joins the tailnet at boot with
-    # the WT_TS_KEY pre-auth key and publishes the 100.x it got, so nothing is tunneled, bridged, proxied
-    # or hosts-pinned any more: this box only needs Tailscale running and logged into the same tailnet.
+    # Remote desktop into the VM. Quick tunnels carry HTTP only (measured: a tcp:// quick tunnel
+    # registers a hostname but no bytes ever reach the origin), so 3389 rides the NAMED tunnel
+    # rdp.kun9.ccwu.cc. Normally nothing has to be handed in at all: winterm.yml passes the tunnel
+    # token and the fixed password in as repo secrets and boot.ps1 starts the connector by itself,
+    # which is why a machine freshly built by -Cmd start is connectable without my help. The inbox
+    # push below is the fallback for a VM that came up without those secrets, and it encrypts to the
+    # ephemeral RSA key the VM published in session.json for exactly this purpose, because the repo
+    # is public. On this side rdp.ps1 is the bridge: a PowerShell WebSocket pump, because the
+    # Cloudflare edge refuses raw TCP 3389 but answers a plain WS upgrade on that hostname.
     $raw = if ($preset) { $preset } else { GetRaw ($api + '/contents/' + $sessPath) }
     if (-not $raw) { Write-Host 'no session.json'; exit 1 }
     $s = if ($preset) { $preset } else { $raw | ConvertFrom-Json }
     if (-not $s.alive) { Write-Host ('session is not alive (closed=' + $s.closed + ')'); exit 1 }
+    if (-not $s.rdp_url) { Write-Host ('no rdp in this session: ' + $s.note); exit 1 }
+    if (-not $s.vm_pub) { Write-Host 'this session predates the hand-in box - start a new one'; exit 1 }
     # ErrorActionPreference is Stop here, so an unseal on a session that never published a ciphertext
     # would abort with a raw crypto exception instead of the sentence below.
     if (-not $s.rdp_cipher) { Write-Host ('this session published no RDP credential: ' + $s.note); exit 1 }
-
-    if (-not $s.ts_ip) {
-        # the VM installs Tailscale at boot and the join takes tens of seconds, so a session that has
-        # not published an address yet is normal for the first minute or two -- wait instead of failing
-        for ($i = 1; $i -le 20; $i++) {
-            Start-Sleep -Seconds 15
-            $t = GetRaw ($api + '/contents/' + $sessPath)
-            if ($t) { $s = $t | ConvertFrom-Json }
-            Write-Host ('  ' + $i + '/20  ts_ip=' + $s.ts_ip + '  ts_diag=' + $s.ts_diag)
-            if ($s.ts_ip -or ($s.ts_diag -match 'KEY-')) { break }
-        }
-    }
-    if (-not $s.ts_ip) {
-        Write-Host ('the VM has published no tailnet address. it says: ' + $s.ts_diag)
-        if ($s.ts_diag -match 'KEY-EXPIRED|KEY-REJECTED') {
-            # pre-auth keys live 90 days; this is the one failure that needs a human, so spell it out
-            Write-Host 'RENEW THE TAILSCALE KEY (they expire 90 days after you create them):'
-            Write-Host '  1) https://login.tailscale.com/admin/settings/keys  -> add a reusable pre-auth key'
-            Write-Host '  2) overwrite ts_key.txt in the keys folder of the packed kit (that copy is the only backup)'
-            Write-Host '  3) github.com/kunge520/kun9-compute -> Settings -> Secrets and variables -> Actions'
-            Write-Host '     -> WT_TS_KEY -> Update -> paste the key'
-            Write-Host '  4) double-click 1 again (or -Cmd start) to build a fresh VM'
-        } else {
-            Write-Host 'wait about a minute and run me again: the VM installs Tailscale at boot and retries the join'
-        }
-        exit 1
-    }
-
     $rp = Unseal $s.rdp_cipher
-    # the login the user asked to keep forever lives in wt_rdp_login.txt, so the VM's generated password
-    # is only a fallback here
+    $hname = ($s.rdp_url -replace '^https://', '')
+    # the login the user asked to keep forever lives in wt_rdp_login.txt and rides to the VM inside the
+    # sealed inbox blob, so it is never written into the public repo in clear text
     $lu = 'Administrator'; $lp = ''
     $lf = Join-Path $env:LOCALAPPDATA 'gh_tools\wt_rdp_login.txt'
     if (Test-Path $lf) {
@@ -187,82 +156,55 @@ function Invoke-Rdp($preset) {
     }
     if ($lp) { $rp = $lp }
 
-    $ts = Local-Ts
-    if (-not $ts) {
-        Write-Host ('no Tailscale on this computer, so there is no route to ' + $s.ts_ip)
-        Write-Host '  install and log in once:  winget install --id Tailscale.Tailscale --accept-package-agreements'
-        exit 1
-    }
-    $mystate = ((& $ts status --peers=false 2>&1) | Out-String) -replace '\s+', ' '
-    Write-Host ('tailscale  ' + $mystate.Substring(0, [Math]::Min(160, $mystate.Length)))
-
-    # say it here rather than letting mstsc open a window that then spins: no route = no tailnet login,
-    # a stale key = the VM half of the pair is down. The SYN itself wakes the peer, but a box that just
-    # joined the tailnet needs its first path negotiated, so retry -- one 8-second probe used to report
-    # 'no route' on a machine that was perfectly reachable a second later.
-    $ok = $false
-    for ($t = 1; $t -le 3; $t++) {
+    if ($s.named -notlike 'running*') {
+        $tokFile = Join-Path $env:LOCALAPPDATA 'gh_tools\wt_tunnel_token.txt'
+        if (-not (Test-Path $tokFile)) { Write-Host ('no tunnel token at ' + $tokFile); exit 1 }
+        if (-not $lp) { Write-Host 'no fixed RDP password in wt_rdp_login.txt'; exit 1 }
+        $payload = @{ t = (Get-Content $tokFile -Raw).Trim(); u = $lu; p = $lp } | ConvertTo-Json -Compress
+        $env2 = Pack-to-VM $s.vm_pub $payload
+        $inbox = @{ run_id = $s.run_id; note = 'named tunnel token + login'; blob = $env2 } | ConvertTo-Json -Compress -Depth 6
+        $body = @{ message = ('winterm inbox ' + $s.run_id); content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($inbox)); branch = 'main' }
+        try { $body.sha = (GetJ ($api + '/contents/winterm/inbox.json')).sha } catch { }
         try {
-            $tc = New-Object Net.Sockets.TcpClient
-            $ar = $tc.BeginConnect($s.ts_ip, 3389, $null, $null)
-            $ok = $ar.AsyncWaitHandle.WaitOne(8000) -and $tc.Connected
-            $tc.Close()
-        } catch { }
-        if ($ok) { break }
-        Write-Host ('  ' + $s.ts_ip + ':3389 not answering yet (try ' + $t + '/3)')
-    }
-    if (-not $ok) {
-        # One timeout, two opposite causes: this box is not on the tailnet, or the VM's node has left
-        # it because the machine ended. tailscale status tells them apart, so name the one that applies
-        # instead of telling everybody to re-login.
-        $peer = (& $ts status 2>&1 | Where-Object { "$_".Contains($s.ts_ip) } | Select-Object -First 1)
-        Write-Host ('cannot reach ' + $s.ts_ip + ':3389 from this computer.')
-        if ("$peer" -match 'offline') {
-            Write-Host ('  that node left the tailnet: ' + "$peer".Trim())
-            Write-Host '  the machine has ended -- double-click 1 (or -Cmd start) for a new one'
-        } elseif (-not $peer) {
-            Write-Host ('  nothing on this tailnet has that address (VM name=' + $s.ts_name + ')')
-            Write-Host '  this box may be logged into a different tailnet: run  & $ts up'
-        } else {
-            Write-Host ('  node is listed but not answering: ' + "$peer".Trim())
-            Write-Host ('  the VM  : ts_diag=' + $s.ts_diag + '  name=' + $s.ts_name)
+            Invoke-RestMethod -Uri ($api + '/contents/winterm/inbox.json') -Method Put -Headers $h -Body ([Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Compress))) -TimeoutSec 60 | Out-Null
+            Write-Host ('inbox pushed for run ' + $s.run_id + ' (the VM polls it every 20 s)')
+        } catch { Write-Host ('inbox push failed: ' + $_.Exception.Message); exit 1 }
+        for ($i = 1; $i -le 12; $i++) {
+            Start-Sleep -Seconds 15
+            $t = GetRaw ($api + '/contents/' + $sessPath)
+            if ($t) { $s = $t | ConvertFrom-Json }
+            Write-Host ('  ' + $i + '/12  named=' + $s.named)
+            if ($s.named -like 'running*') { break }
         }
-        exit 1
     }
+    Write-Host ('named      ' + $s.named + '  procs=' + $s.named_procs + '  origin_http=' + $s.origin_http + '  vm=' + $s.note)
 
+    # The bridge is rdp.ps1's own PowerShell WebSocket one now, not cloudflared: the Cloudflare edge
+    # drops raw TCP 3389 but answers an unauthenticated WS upgrade on the tcp-ingress hostname, and
+    # 55 MB of cloudflared is not something to go fetching on every computer. So what is left of this
+    # function is the VM side -- hand in the tunnel token, wait for named=running -- and the client
+    # side is one call to the installed bridge script.
+    $client = Join-Path $env:LOCALAPPDATA 'kun9_rdp\rdp.ps1'
+    if (-not (Test-Path $client)) {
+        $cdir = Split-Path $client
+        if (-not (Test-Path $cdir)) { New-Item -ItemType Directory -Path $cdir -Force | Out-Null }
+        try {
+            Invoke-WebRequest -UseBasicParsing 'https://ch.kun9.ccwu.cc/mxd/rig_rdp.txt' -OutFile $client -TimeoutSec 90
+        } catch { Write-Host ('could not fetch the bridge client: ' + $_.Exception.Message); exit 1 }
+    }
     # mstsc keys the cached credential on the address as typed, and that address carries a port now.
-    & cmdkey.exe ('/generic:TERMSRV/' + $s.ts_ip) ('/user:' + $lu) ('/pass=' + $rp) 2>&1 | Out-Null
-    Write-Host ('login      ' + $lu + '   address=' + $s.ts_ip + ':3389   name=' + $s.ts_name + '   ends ' + $s.ends)
+    & cmdkey.exe ('/generic:TERMSRV/' + $hname + ':13389') ('/user:' + $lu) ('/pass=' + $rp) 2>&1 | Out-Null
+    & cmdkey.exe ('/generic:TERMSRV/' + $hname) ('/user:' + $lu) ('/pass=' + $rp) 2>&1 | Out-Null
+    Write-Host ('login      ' + $lu + '   address=' + $hname + ':13389   ends ' + $s.ends + '   client=' + $client)
     # Auto-renew was retired on 2026-10-09 by the user: continuously re-spawning a Windows runner is
     # "Actions used as a free VPS", the one shape GitHub suspends accounts for, and this box is only
     # powered on occasionally. Say plainly that the machine has an end time instead of implying it
     # stays up forever -- double-click shortcut 1 (or -Cmd start) when you want another one.
     Write-Host ('lapses     ' + $s.ends + '   auto-renew is removed on purpose; start a new machine when you need one')
+    # rdp.ps1 starts the bridge if none is listening, pre-answers the unknown-publisher warning and
+    # opens mstsc itself. The password is deliberately not echoed.
     if ($script:NOGUI) { Write-Host 'mstsc      not opened (no-gui run)'; return }
-    # Windows 11 builds after 26100 ship without mstsc.exe, so fall back to the store client. A missing
-    # client is reported, never installed by us.
-    $cli = @((Join-Path $env:WINDIR 'System32\mstsc.exe'), (Join-Path $env:ProgramFiles 'Remote Desktop\msrdc.exe'),
-             (Join-Path ${env:ProgramFiles(x86)} 'Remote Desktop\msrdc.exe')) |
-           Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-    if (-not $cli) {
-        Write-Host 'no Remote Desktop client on this computer. Paste this once, then run me again:'
-        Write-Host '  winget install --id Microsoft.RemoteDesktopClient --accept-package-agreements'
-        exit 1
-    }
-    # mstsc supports /v: and ignores the .rdp file if the machine has no .rdp association (a copied
-    # mstsc.exe often has none). msrdc does not parse /v: correctly -- given a bare address it opens
-    # its workspace page and never dials -- so it must keep the .rdp file. Credentials come from the
-    # cmdkey entry written above, not from either file.
-    if ((Split-Path $cli -Leaf) -eq 'mstsc.exe') {
-        Start-Process -FilePath $cli -ArgumentList ('/v:' + $s.ts_ip + ':3389')
-    } else {
-        $rdpf = Join-Path $env:TEMP ('kun9_' + ($s.ts_ip -replace '\.', '_') + '.rdp')
-        @(('Full Address:s:' + $s.ts_ip + ':3389'),
-          ('UserName:s:' + $lu),
-          'prompt for credentials:i:0',
-          'authentication level:i:0') -join "`r`n" | Set-Content -Path $rdpf -Encoding ascii
-        Start-Process -FilePath $cli -ArgumentList ('"' + $rdpf + '"')
-    }
+    Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $client) -WindowStyle Hidden
 }
 if ($Cmd -eq 'rdp') { Invoke-Rdp $null; exit }
 
@@ -272,7 +214,7 @@ if ($Cmd -eq 'status') {
         try {
             $s = $raw | ConvertFrom-Json
             if ($s.alive) { $p = Unseal $s.cipher; Show $s $p; Probe $s $p } else { Write-Host ('dead  closed=' + $s.closed + '  run=' + $s.run_id) }
-        } catch { Write-Host ('status failed: ' + $_.Exception.Message + '  (session.json head: ' + $raw.Substring(0, [Math]::Min(120, $raw.Length)) + ')') }
+        } catch { Write-Host ('unparseable: ' + $raw) }
     } else { Write-Host 'no session.json published' }
     foreach ($r in (@(RunsOf $wf) | Select-Object -First 5)) {
         Write-Host ('#' + $r.run_number + '  ' + $r.created_at + '  ' + $r.status + ' ' + $r.conclusion + '  ' + $r.html_url)
@@ -291,9 +233,6 @@ if ($Cmd -eq 'stop') {
             Write-Host ('cancelled run #' + $r.run_number)
         } catch { Write-Host ('cancel failed: ' + $_.Exception.Message) }
     }
-    # the tailnet address is per-session, so read the live heartbeat before replacing it
-    $sip = ''
-    try { $t0 = GetRaw ($api + '/contents/' + $sessPath); if ($t0) { $sip = "$(($t0 | ConvertFrom-Json).ts_ip)" } } catch { }
     try {
         $cur = GetJ ($api + '/contents/' + $sessPath)
         $dead = '{"alive":false,"note":"closed by -Cmd stop","closed":"' + (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd''T''HH:mm:ssZ') + '"}'
@@ -304,7 +243,6 @@ if ($Cmd -eq 'stop') {
     & cmdkey.exe ('/delete:TERMSRV/' + 'rdp.kun9.ccwu.cc:13389') 2>&1 | Out-Null
     & cmdkey.exe ('/delete:TERMSRV/' + 'rdp.kun9.ccwu.cc') 2>&1 | Out-Null
     & cmdkey.exe '/delete:termsrv:localhost:13389' 2>&1 | Out-Null
-    if ($sip -match '^\d+\.\d+\.\d+\.\d+$') { & cmdkey.exe ('/delete:TERMSRV/' + $sip) 2>&1 | Out-Null }
     Write-Host 'saved RDP credential removed'
     # A computer still running an OLD kit may have the timer armed; stopping must leave nothing behind,
     # otherwise the machine comes back five minutes later and the stop button looks broken.
