@@ -31,8 +31,9 @@
 # - ttyd.win32.exe was observed Dying mid-session (Cloudflare then answers 502 forever), so the
 # wait is a supervising loop that restarts it and republishes, instead of a blind sleep.
 # - QUICK TUNNELS CARRY HTTP ONLY. Measured locally: a tcp:// quick tunnel registers a hostname and
-# the edge even answers the websocket upgrade, but no bytes ever reach the origin. So RDP (3389)
-# goes through a NAMED tunnel (wt/rdp.kun9.ccwu.cc), which also stops the hostname rotating.
+# the edge even answers the websocket upgrade, but no bytes ever reach the origin. So RDP never goes
+# through a tunnel at all -- it is reached over the Tailscale tailnet -- and the named tunnel only
+# carries the browser terminal.
 # - the PAT behind this repo has no `secrets` scope, so the tunnel token cannot be an Actions
 # secret. It is handed in through the repo instead: the VM makes an ephemeral RSA key and
 # publishes ONLY the public half; the local client then pushes winterm/inbox.json with the token
@@ -250,6 +251,7 @@ function Publish($extra) {
     origin_http = "$TTYD_ORIGIN"; restarts = $RESTARTS; cf_procs = $CFN; ttyd_procs = $TTYN
     named_procs = $NPN; named = $NAMED; vm_pub = $VM_PUB; url_quick = $QUICK_URL; inbox_diag = $INBOXDIAG
     boot_diag = $BOOTDIAG
+    ts_ip = $TS_IP; ts_name = $TS_NAME; ts_diag = $TSDIAG
     tail_err = (Tail (Join-Path $work 'ttyd.err') 3); cf_tail = (Tail (Join-Path $work 'cf.log') 2)
     cfn_tail = ((Tail (Join-Path $work 'cfn.log') 2) + ' || ' + (Tail (Join-Path $work 'cfn.err') 4))
   }
@@ -308,6 +310,11 @@ $RDP_FIXED = ''
 $INBOXDIAG = 'none'
 $BOOTDIAG = 'no-secrets'
 $script:BOOT_TOK = ''
+$TS_IP = ''
+$TS_NAME = ''
+$TSDIAG = 'not-attempted'
+$script:BOOT_TSK = ''
+$script:TSTRY = 0
 $NAMED = 'waiting-for-token'
 $NPN = 0
 $script:lastBlob = ''
@@ -387,7 +394,9 @@ try {
   } catch { }
   $rdpNote = 'TermService=' + (Get-Service TermService -EA SilentlyContinue).Status + ' listeners3389=' + $listen + ' user=' + [bool](Get-LocalUser -Name 'fleet' -EA SilentlyContinue) + ' owners=' + $owners.Trim()
   $rdpNote = $rdpNote + ' rdpcert=' + $rdpcert + ' gen=' + $GEN
-  if ($listen -ge 1) { $script:RDP_URL = 'https://rdp.kun9.ccwu.cc' } else { $rdpNote = 'NO-3389-LISTENER; ' + $rdpNote }
+  # Remote Desktop is reached over the tailnet now (see the Tailscale section), so there is no tunnel
+  # hostname to publish; 'tailnet' just tells the client the listener is real and where to look.
+  if ($listen -ge 1) { $script:RDP_URL = 'tailnet' } else { $rdpNote = 'NO-3389-LISTENER; ' + $rdpNote }
   # Does RDP answer a dial from INSIDE the VM? A listener count alone cannot tell a working
   # terminal server from one that accepts and immediately resets, which is exactly the
   # difference between "the runner's RDP is broken" and "the tunnel is broken".
@@ -413,12 +422,6 @@ try {
     } else { $rdpNote = $rdpNote + ' loop-x224=connect-timeout' }
     $tc.Close()
   } catch { $rdpNote = $rdpNote + ' loop-x224=err:' + ($_.Exception.Message -replace '\s+', ' ') }
-  # relay in front of 3389: if the listener is fine but cloudflared's own dial is not,
-  # routing through netsh's portproxy still lands on the same terminal server.
-  & netsh interface portproxy add v4tov4 listenaddress=127.0.0.1 listenport=13389 connectaddress=127.0.0.1 connectport=3389 2>&1 | Out-Null
-  $rdpNote = $rdpNote + ' relay=' + (Get-NetTCPConnection -LocalPort 13389 -State Listen -EA SilentlyContinue | Measure-Object).Count
-  $l13 = (Get-NetTCPConnection -LocalPort 13389 -State Listen -EA SilentlyContinue | Measure-Object).Count
-  if ($l13 -ge 1) { $script:RDP_URL = 'https://rdp.kun9.ccwu.cc' }
 } catch { $rdpNote = 'rdp enable failed: ' + $_.Exception.Message }
 Write-Host ('rdp setup: ' + $rdpNote)
 
@@ -457,6 +460,48 @@ if ($env:WT_TUNNEL_TOKEN) {
   }
   Write-Host ('named at boot: ' + $NAMED)
 } elseif ($BOOTDIAG -eq 'no-secrets') { $script:BOOTDIAG = 'WT_TUNNEL_TOKEN secret missing' }
+
+# ---- Tailscale: the tailnet is how Remote Desktop reaches this box ----
+# Silent install, join with the pre-auth key from the WT_TS_KEY secret, publish the 100.x address.
+# The key travels in the environment only (never argv, never printed) and the node is ephemeral, so
+# it drops out of the tailnet by itself when the runner goes away.
+function Start-Tailnet([string]$Key) {
+  $cli = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+  if (-not (Test-Path $cli)) {
+    $exe = Join-Path $work 'tailscale-setup.exe'
+    try { Invoke-WebRequest -Uri 'https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe' -OutFile $exe -UseBasicParsing -TimeoutSec 180 } catch { $script:TSDIAG = 'download-failed' }
+    if (Test-Path $exe) { Start-Process -FilePath $exe -ArgumentList '/silent' -Wait -EA SilentlyContinue }
+  }
+  if (-not (Test-Path $cli)) { $script:TSDIAG = 'install-failed: no tailscale.exe after setup'; Write-Host $TSDIAG; return }
+  if (-not $Key) { if ($TSDIAG -eq 'not-attempted') { $script:TSDIAG = 'WT_TS_KEY secret missing' }; return }
+  # 3389 stays closed to the runner's public interface; only the tailnet range may reach it
+  & netsh advfirewall firewall add rule name=winterm-tailnet-rdp dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10 2>&1 | Out-Null
+  $script:TS_NAME = 'gh-' + (([Guid]::NewGuid()).ToString('N')).Substring(0, 6)
+  $env:TS_AUTHKEY = $Key
+  $out = ((& $cli up ('--hostname=' + $TS_NAME) --ephemeral 2>&1) | Out-String)
+  Remove-Item env:TS_AUTHKEY -Force -EA SilentlyContinue
+  $rc = $LASTEXITCODE
+  for ($i = 0; $i -lt 15; $i++) {
+    $ip = ((& $cli ip -4 2>$null) | Select-Object -First 1)
+    if ("$ip" -match '(\d+\.\d+\.\d+\.\d+)') { $script:TS_IP = $matches[1]; break }
+    Start-Sleep -Seconds 2
+  }
+  if ($TS_IP) {
+    $script:TSDIAG = 'up as ' + $TS_NAME
+  } else {
+    # the two failure the user can act on: the key aged out (90 days) or the key was never valid
+    $why = ShortTxt $out 180
+    if ($out -match '(?i)expired') { $script:TSDIAG = 'KEY-EXPIRED exit=' + $rc + ' ' + $why }
+    elseif ($out -match '(?i)invalid|bad.?auth|not.?allowed|authkey|untagged') { $script:TSDIAG = 'KEY-REJECTED exit=' + $rc + ' ' + $why }
+    else { $script:TSDIAG = 'no-ip exit=' + $rc + ' ' + $why }
+  }
+  Write-Host ('tailscale: ' + $TSDIAG + ' ip=' + $TS_IP)
+}
+
+$script:BOOT_TSK = "$env:WT_TS_KEY".Trim()
+$script:INBOXDIAG = $INBOXDIAG + ' ts_key_len=' + $BOOT_TSK.Length
+if ($BOOT_TSK) { $script:TSTRY = 1; Start-Tailnet $BOOT_TSK } else { $script:TSDIAG = 'WT_TS_KEY secret missing' }
+Write-Host ('tailscale at boot: ' + $TSDIAG + ' ip=' + $TS_IP)
 
 function RdpDiag {
   # The client only ever sees "the session died seconds after logon", and nothing in the X.224 handshake
@@ -506,6 +551,15 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
     Start-Ttyd
     Start-Sleep -Seconds 5
     $code = OriginCode 7681
+    $changed = $true
+  }
+
+  # a failed first join (installer still unpacking, tailnet momentarily unreachable) is retried a few
+  # times; a rejected key is not, so the heartbeat keeps the KEY-EXPIRED text instead of retry noise
+  if (-not $TS_IP -and $BOOT_TSK -and $script:TSTRY -lt 4 -and $TSDIAG -notmatch 'KEY-') {
+    $script:TSTRY = $script:TSTRY + 1
+    Write-Host ('tailscale retry #' + $TSTRY + ' (last: ' + $TSDIAG + ')')
+    Start-Tailnet $BOOT_TSK
     $changed = $true
   }
 
