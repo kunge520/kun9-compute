@@ -17,6 +17,14 @@ const RAW = 'https://raw.githubusercontent.com/' + REPO + '/main/winterm/session
 const TTYD = 'https://wt.kun9.ccwu.cc';
 const RUNS = '/repos/' + REPO + '/actions/workflows/' + WF + '/runs?per_page=3';
 const COOKIE = 'vmctl';
+// Browser RDP is only served to a request Access already trusts, and the only trust this kit can
+// mint by itself is its own OIDC provider: the panel cookie IS the identity, so 打开桌面 costs no
+// emailed PIN. Access refuses Service Auth and bypass policies for RDP apps, hence a real IdP.
+const RDP_APP = 'https://rdp.kun9.ccwu.cc';
+const RDP_PATH = '0906b491-71ec-42d1-93b5-aa9048aa2529/127.0.0.1/3389';
+const IDP_HOST = 'ctl.kun9.ccwu.cc';
+const IDP_CID = 'vmctl-panel';
+const IDP_EMAIL = '645478520@qq.com';
 
 export default {
   async fetch(req, env) {
@@ -52,17 +60,69 @@ export default {
       return send(JSON.stringify({ ok: true }), 'application/json');
     }
 
+    // ---- own OIDC provider: Access asks it who the user is, the panel cookie is the answer ----
+    if (url.pathname === '/oidc/jwks') return send(JSON.stringify(await jwks(env)), 'application/json');
+    if (url.pathname === '/oidc/authorize') {
+      const rd = url.searchParams.get('redirect_uri') || '';
+      if (!/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com\/cdn-cgi\/access\/callback$/.test(rd)) {
+        return send('redirect_uri 不是 Access 的回调地址', 'text/plain', 400);
+      }
+      const want = COOKIE + '=' + (env.PANEL_KEY ? await sig(env) : 'x');
+      if (!(req.headers.get('Cookie') || '').includes(want)) {
+        // Straight back here after the password, so the login never dead-ends on the panel.
+        return send('', 'text/plain', 302, { Location: '/?next=' + encodeURIComponent(url.pathname + url.search) });
+      }
+      const code = b64u(new Uint8Array(await crypto.subtle.digest('SHA-256', enc().encode(String(Date.now()) + Math.random()))));
+      await env.STORE.put(
+        'c_' + code,
+        JSON.stringify({
+          rd: rd,
+          st: url.searchParams.get('state') || '',
+          nc: url.searchParams.get('nonce') || '',
+          cc: url.searchParams.get('code_challenge') || '',
+        }),
+        { expirationTtl: 120 }
+      );
+      const back = new URL(rd);
+      back.searchParams.set('code', code);
+      const st = url.searchParams.get('state');
+      if (st) back.searchParams.set('state', st);
+      return send('', 'text/plain', 302, { Location: back.toString() });
+    }
+    if (req.method === 'POST' && url.pathname === '/oidc/token') {
+      // Called by Access's backend, so no cookie here: client_id/secret is the whole gate, and a
+      // code is single-use and lives two minutes.
+      let p = {};
+      try {
+        p = Object.fromEntries(await req.formData());
+      } catch (e) {
+        p = await readJson(req);
+      }
+      const rec = await read(env, 'c_' + String(p.code || ''));
+      const secret = String(p.client_secret || '');
+      let ok = p.client_id === IDP_CID && !!env.IDP_SECRET && secret === String(env.IDP_SECRET);
+      if (ok && rec && rec.cc) {
+        const digest = await crypto.subtle.digest('SHA-256', enc().encode(String(p.code_verifier || '')));
+        ok = b64u(new Uint8Array(digest)) === rec.cc;
+      }
+      if (!ok || !rec) return send(JSON.stringify({ error: 'invalid_grant' }), 'application/json', 400);
+      await env.STORE.delete('c_' + String(p.code || ''));
+      return send(JSON.stringify({ token_type: 'Bearer', access_token: 'panel', expires_in: 300, id_token: await idToken(env, rec) }), 'application/json');
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/login') {
       const form = await req.formData().catch(() => null);
-      const given = form ? form.get('p') : (await readJson(req)).p;
-      if (!env.PANEL_KEY || String(given || '') !== String(env.PANEL_KEY)) {
+      const body = form ? { p: form.get('p'), next: form.get('next') } : await readJson(req);
+      if (!env.PANEL_KEY || String(body.p || '') !== String(env.PANEL_KEY)) {
         return send(page('口令不对', '登录'), 'text/html', 401);
       }
       // 302 back to the panel: a form post that answers 204 leaves the browser on a blank page,
-      // and 进入 looks like it did nothing.
+      // and 进入 looks like it did nothing. An OIDC round trip names where to go back to, and only
+      // its own authorize path is accepted -- never an outside URL.
+      const back = String(body.next || '').startsWith('/oidc/authorize?') ? String(body.next) : '/';
       return send('', 'text/plain', 302, {
         'Set-Cookie': COOKIE + '=' + await sig(env) + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000',
-        Location: '/',
+        Location: back,
       });
     }
     if (url.pathname === '/logout') {
@@ -300,6 +360,7 @@ async function status(env) {
       run_id: s.run_id || '',
       restarts: mine ? s.restarts : 0,
       origin: mine ? String(s.origin_http || '') : '',
+      rdp: mine ? String(s.rdp_diag || '') : '',
       ttl_min: s.ttl_min,
       closed: s.closed || '',
     };
@@ -328,8 +389,43 @@ async function status(env) {
   return out;
 }
 
-async function sig(env) {
-  const enc = new TextEncoder();
+const enc = () => new TextEncoder();
+const b64u = (bytes) =>
+  btoa(String.fromCharCode.apply(null, Array.from(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+async function idpKey(env) {
+  // The signing key lives in a secret_text binding (IDP_JWK), never in KV, and Access only ever
+  // sees the public half through /oidc/jwks.
+  const jwk = JSON.parse(String(env.IDP_JWK));
+  const key = await crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, true, ['sign']);
+  return { key: key, kid: jwk.kid || 'vmctl1' };
+}
+
+async function jwks(env) {
+  const pub = Object.assign({}, JSON.parse(String(env.IDP_JWK)));
+  ['d', 'p', 'q', 'dp', 'dq', 'qi', 'k'].forEach((x) => delete pub[x]);
+  pub.key_ops = ['verify'];
+  pub.kid = pub.kid || 'vmctl1';
+  pub.alg = 'RS256';
+  pub.use = 'sig';
+  return { keys: [pub] };
+}
+
+async function idToken(env, rec) {
+  const { key, kid } = await idpKey(env);
+  const now = Math.floor(Date.now() / 1000);
+  const head = { alg: 'RS256', typ: 'JWT', kid: kid };
+  const body = {
+    iss: 'https://' + IDP_HOST, aud: IDP_CID, sub: 'vmctl-owner', iat: now, exp: now + 300,
+    email: IDP_EMAIL, email_verified: true, name: 'kun9', preferred_username: 'kun9',
+  };
+  if (rec.nc) body.nonce = rec.nc;
+  const unsigned = b64u(enc().encode(JSON.stringify(head))) + '.' + b64u(enc().encode(JSON.stringify(body)));
+  const sign = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, enc().encode(unsigned));
+  return unsigned + '.' + b64u(new Uint8Array(sign));
+}
+
+async function sig(env) {  const enc = new TextEncoder();
   const key = await crypto.subtle.importKey('raw', enc.encode(String(env.PANEL_KEY)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const mac = await crypto.subtle.sign('HMAC', key, enc.encode('vmctl-v1'));
   return Array.from(new Uint8Array(mac))
@@ -342,7 +438,9 @@ function page(title, mode) {
     return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
       '<title>' + title + '</title><style>' + css() + '</style></head><body><div class="wrap"><form class="card login" method="post" action="/api/login">' +
       '<h1>' + title + '</h1><p>网页控制台面板</p><input type="password" name="p" placeholder="面板口令" autofocus autocomplete="current-password">' +
-      '<button type="submit">进入</button></form></div></body></html>';
+      '<input type="hidden" name="next" id="next"><button type="submit">进入</button></form></div>' +
+      '<script>var n=new URLSearchParams(location.search).get("next");if(n&&n.indexOf("/oidc/authorize?")==0)document.getElementById("next").value=n;</script>' +
+      '</body></html>';
   }
   if (mode === '令牌') {
     return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
@@ -375,10 +473,10 @@ function page(title, mode) {
     '<div><span>心跳</span><b id="check">-</b></div>' +
     '</div><div id="note" class="note"></div></div>' +
     '<div class="card acts">' +
+    '<button id="brdp" class="term">打开桌面</button>' +
     '<button id="bstart" class="ok">开机</button>' +
-    '<button id="bterm" class="term">打开终端</button>' +
+    '<button id="bterm" class="ghost">旧终端</button>' +
     '<button id="bstop" class="stop">关机</button>' +
-    '<button id="bttyd" class="ghost">重启终端</button>' +
     '<a class="log" id="log" href="#" target="_blank">看日志</a>' +
     '</div>' +
     '<div id="msg" class="msg"></div>' +
@@ -455,11 +553,11 @@ function app() {
     " $('ends').textContent=fmt(v.ends);",
     " $('check').textContent=fmt(v.check);",
     " $('run').textContent=u?('#'+(u.number||'')+' '+u.status+(u.conclusion?' / '+u.conclusion:'')):'-';",
-    " $('note').innerHTML=(v.note?('状态：'+esc(v.note)+(v.restarts>0?(' · 终端自愈过 '+esc(v.restarts)+' 次'):'')):'')+(r.error?('<br>'+esc(r.error)):'');",
+    " $('note').innerHTML=(v.note?('状态：'+esc(v.note)+(v.restarts>0?(' · 终端自愈过 '+esc(v.restarts)+' 次'):'')):'')+(v.rdp?('<br>桌面 '+esc(v.rdp)):'')+(r.error?('<br>'+esc(r.error)):'');",
     " if(v.url&&/^https:\\/\\//.test(v.url))vu=v.url;",
     " $('log').href=u.url||'https://github.com/kunge520/kun9-compute/actions';",
     " $('bterm').disabled=!alive;",
-    " $('bttyd').disabled=!alive;",
+    " $('brdp').disabled=!alive;",
     " $('bstart').disabled=!!(alive||runLive||(q&&q.action==='start'));",
     " $('bstop').disabled=!(alive||runLive)&&!(q&&q.action==='stop');",
     " $('tok').textContent=r.has_token?'已配令牌（秒开机）':'配令牌（可选，秒开机）';",
@@ -470,7 +568,8 @@ function app() {
     "$('bterm').onclick=function(){if(vu)window.open(vu,'_blank')};",
     "$('bstart').onclick=async function(){say('正在排队开机…');var x=await post('/api/queue',{action:'start'});say(x.j.note||(x.j.ok?'已排队':'开机失败：'+x.code));setTimeout(tick,1500)};",
     "$('bstop').onclick=async function(){if(!confirm('确定关机？这台机器上的未保存内容会丢。'))return;say('正在下发关机…');var x=await post('/api/queue',{action:'stop'});say(x.j.note||(x.j.ok?'已下发':'关机失败：'+x.code));setTimeout(tick,1500)};",
-    "$('bttyd').onclick=async function(){if(!confirm('只重启网页终端：机器不动，已打开的终端标签会断几秒。'))return;say('正在下发终端重启…');var x=await post('/api/queue',{action:'ttyd'});say(x.j.note||(x.j.ok?'已下发':'下发失败：'+x.code));setTimeout(tick,3000)};",
+    "var RDPURL='" + RDP_APP + '/rdp/' + RDP_PATH + "';",
+    "$('brdp').onclick=function(){window.open(RDPURL,'_blank')};",
     "setInterval(function(){",
     " if(!waiting)return;",
     " var s=wait0?Math.max(0,Math.round((Date.now()-wait0)/1000)):0;",
