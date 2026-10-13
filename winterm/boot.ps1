@@ -277,8 +277,11 @@ Invoke-WebRequest -Uri $ttydUrl -OutFile (Join-Path $work 'ttyd.exe')
 Write-Host ('binaries cf=' + (Get-Item (Join-Path $work 'cf.exe')).Length + 'B ttyd=' + (Get-Item (Join-Path $work 'ttyd.exe')).Length + 'B src=' + $ttydUrl)
 
 # ---- terminal credentials ----
-$PASS = New-Pass
-$RDP_PASS = New-Pass
+# The browser terminal shares the remote desktop's one fixed login (WT_RDP_PASS), so there is a single
+# password to remember and no second repo variable. Without that secret both stay per-machine random.
+$FIXED = "$env:WT_RDP_PASS".Trim()
+$PASS = if ($FIXED) { $FIXED } else { New-Pass }
+$RDP_PASS = if ($FIXED) { $FIXED } else { New-Pass }
 $OPENED = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 $ENDS = (Get-Date).ToUniversalTime().AddSeconds($SECS).ToString('yyyy-MM-ddTHH:mm:ssZ')
 
