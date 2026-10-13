@@ -5,11 +5,17 @@
 # id (Desktop/密钥.txt, line 9 and line 5) and the panel password (密钥-换电脑拷走/console_key.txt,
 # which sits next to this repo in the working tree). Everything else here is public.
 #
+# A deploy REPLACES the whole binding set, so every secret the Worker needs has to be listed in the
+# metadata below -- anything left out is gone the moment this runs. The OIDC signing key and its
+# client secret live next to the panel password (idp_jwk.json / idp_client_secret.txt), because the
+# browser-desktop login is minted by this Worker itself and losing that key means re-creating the
+# Access identity provider.
+#
 # The source is fetched from raw.githubusercontent rather than the live Worker, because reading the
 # deployed script back returns a multipart envelope whose Content-Disposition line is not JS.
 # Pass a file as $1 to deploy that copy instead (raw caches by path for a minute after a push).
 #
-# Requires: bash, curl, openssl. Run: bash vmctl/deploy.sh [source.js]
+# Requires: bash, curl. Run: bash vmctl/deploy.sh [source.js]
 set -u
 REPO=kunge520/kun9-compute
 WORKER=vm-ctl
@@ -17,10 +23,12 @@ KV=4489efce29d9412b80e727a92d0410f2
 CDATE=2026-10-01
 HERE=$(cd "$(dirname "$0")" && pwd)
 SECRETS="$HOME/Desktop/密钥.txt"
-KEYFILE="$HERE/../密钥-换电脑拷走/console_key.txt"
-[ -f "$KEYFILE" ] || KEYFILE="$HOME/Desktop/github xuniji/密钥-换电脑拷走/console_key.txt"
+VAULT="$HERE/../密钥-换电脑拷走"
+[ -d "$VAULT" ] || VAULT="$HOME/Desktop/github xuniji/密钥-换电脑拷走"
 [ -f "$SECRETS" ] || { echo "缺少 $SECRETS（Cloudflare API token 第 9 行、account id 第 5 行）"; exit 1; }
-[ -f "$KEYFILE" ] || { echo "缺少 $KEYFILE（面板口令）"; exit 1; }
+for f in console_key.txt idp_jwk.json idp_client_secret.txt; do
+  [ -f "$VAULT/$f" ] || { echo "缺少 $VAULT/$f（面板口令 / 登录签名密钥 / 客户端密钥）"; exit 1; }
+done
 
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 # curl.exe is a native Windows binary: it cannot read the /tmp path bash hands it, so every
@@ -37,11 +45,18 @@ fi
 grep -q 'export default' "$D/vm-ctl.worker.js" || { echo "源码不对（没有 export default），取消部署"; exit 1; }
 echo "source=$(wc -c < "$D/vm-ctl.worker.js") bytes"
 
+# A secret_text value goes into JSON as a string, so backslash and quote are the two things that
+# have to be escaped; the single-line files also lose their line endings here.
+esc() { tr -d '\r\n' < "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
 TOK=$(sed -n '9p' "$SECRETS" | tr -d '\r\n ')
 ACCT=$(sed -n '5p' "$SECRETS" | tr -d '\r\n ')
-KEY=$(tr -d '\r\n' < "$KEYFILE")
 printf 'header = "Authorization: Bearer %s"\n' "$TOK" > "$WD/.cf"
-printf '%s' '{"main_module":"vm-ctl.worker.js","compatibility_date":"'"$CDATE"'","bindings":[{"name":"PANEL_KEY","type":"secret_text","text":"'"$KEY"'"},{"name":"STORE","type":"kv_namespace","namespace_id":"'"$KV"'"}]}' > "$WD/metadata.json"
+printf '%s' '{"main_module":"vm-ctl.worker.js","compatibility_date":"'"$CDATE"'","bindings":[\
+{"name":"PANEL_KEY","type":"secret_text","text":"'"$(esc "$VAULT/console_key.txt")"'"},\
+{"name":"IDP_JWK","type":"secret_text","text":"'"$(esc "$VAULT/idp_jwk.json")"'"},\
+{"name":"IDP_SECRET","type":"secret_text","text":"'"$(esc "$VAULT/idp_client_secret.txt")"'"},\
+{"name":"STORE","type":"kv_namespace","namespace_id":"'"$KV"'"}]}' > "$WD/metadata.json"
 
 code=$(curl -sS -m 120 --config "$WD/.cf" -o "$WD/out.json" -w '%{http_code}' -X PUT \
   "https://api.cloudflare.com/client/v4/accounts/$ACCT/workers/scripts/$WORKER" \
@@ -49,4 +64,6 @@ code=$(curl -sS -m 120 --config "$WD/.cf" -o "$WD/out.json" -w '%{http_code}' -X
   --form "vm-ctl.worker.js=@$WD/vm-ctl.worker.js;type=application/javascript+module;filename=vm-ctl.worker.js")
 echo "deploy=$code"
 grep -o '"success":[a-z]*\|"message":"[^"]*"' "$WD/out.json" | head -4
-curl -sS -m 30 -o /dev/null -w 'page=%{http_code}\n' https://ctl.kun9.ccwu.cc/
+curl -sS -m 30 -o "$WD/jwks.json" -w 'jwks=%{http_code}\n' https://ctl.kun9.ccwu.cc/oidc/jwks
+grep -o '"kty":"RSA"\|"kid":"[^"]*"\|"d":' "$WD/jwks.json" | head -3
+curl -sS -m 30 -o /dev/null -w 'panel=%{http_code}\n' https://ctl.kun9.ccwu.cc/
