@@ -1,6 +1,6 @@
 ﻿param(
-    # connect the running VM over Remote Desktop and exit (this is what the one-line paste runs after
-    # the first install). No buttons, no keys copy, no GitHub token needed beyond what -Cmd rdp wants.
+    # only set up the RDP bridge on this computer (this is what the one-line paste runs). No buttons,
+    # no keys, no GitHub token needed.
     [switch]$Rdp,
     # where the four buttons are written; defaults to the folder this file sits in
     [string]$Dir = '',
@@ -31,13 +31,14 @@ $Mx  = 'https://ch.kun9.ccwu.cc/mxd/'
 
 # local name -> repo file, relay file, pinned sha1 ('' = nothing pinned yet)
 $Pin = @{
-    '_winterm.ps1' = @{ gh = 'winterm.ps1'; mx = 'rig_gh_winterm.txt'; sha = '68db840ada6e25d446595fd0460b26243fbafde8' }
+    'rdp.ps1'      = @{ gh = 'rdp.ps1';     mx = 'rig_rdp.txt';        sha = '4e6b137268914dd98bad0031aa9a4e173872db15' }
+    '_winterm.ps1' = @{ gh = 'winterm.ps1'; mx = 'rig_gh_winterm.txt'; sha = 'bca93514fd52acbc9c2afdb471762764b49c7acc' }
 }
 
 $tool = Join-Path $env:LOCALAPPDATA 'gh_tools'
 $rdpDir = Join-Path $env:LOCALAPPDATA 'kun9_rdp'
 if (-not (Test-Path $tool)) { New-Item -ItemType Directory -Path $tool -Force | Out-Null }
-$Keys = @('pat.txt', 'wt_priv.xml', 'wt_rdp_login.txt', 'wt_tunnel_token.txt', 'ts_key.txt')
+$Keys = @('pat.txt', 'wt_priv.xml', 'wt_rdp_login.txt', 'wt_tunnel_token.txt')
 
 function Sha1($p) { (Get-FileHash -Path $p -Algorithm SHA1).Hash.ToLower() }
 function A($s) { ('' + $s) -replace '[^\x20-\x7e]', '?' }
@@ -124,48 +125,50 @@ function Place([string]$name, [string]$dstDir) {
 
 # ------------------------------------------------------------------ RDP only
 if ($Rdp) {
-    # Remote Desktop is one command now: whatever -Cmd rdp does on a fully installed machine.
-    $wm = Join-Path $tool '_winterm.ps1'
-    if (-not (Test-Path $wm)) { [void](Place '_winterm.ps1' $tool) }
-    if (-not (Test-Path $wm)) {
-        Write-Host 'FAIL   no _winterm.ps1 and the cloud is unreachable -- double-click 1 (it installs itself first).'
-        if (-not $NoPause) { Read-Host 'Press Enter' | Out-Null }
-        exit 1
+    if (-not (Test-Path $rdpDir)) { New-Item -ItemType Directory -Path $rdpDir -Force | Out-Null }
+    $dst = Join-Path $rdpDir 'rdp.ps1'
+    if (-not (NearPinned 'rdp.ps1' $dst)) {
+        $r = Fetch 'rdp.ps1' $dst
+        if ($r) {
+            Write-Host ('got    rdp.ps1  ' + $r.bytes + ' B  from ' + $r.src + '  sha1=' + $r.sha.Substring(0, 12))
+        } else {
+            # All three sources dead (or this computer has no route to GitHub at all). The packed folder
+            # carries an offline copy of the same file, so use it instead of telling the user to copy by hand.
+            $near = $null
+            if ($PSScriptRoot) { $c = Join-Path $PSScriptRoot 'rdp.ps1'; if (Test-Path $c) { $near = $c } }
+            if (-not $near) {
+                Write-Host 'FAIL   rdp.ps1 could not be downloaded from jsdelivr, github-raw or the relay.'
+                Write-Host '       Put rdp.ps1 here by hand (from the packed folder) and double-click it.'
+                if (-not $NoPause) { Read-Host 'Press Enter' | Out-Null }
+                exit 1
+            }
+            Copy-Item $near $dst -Force
+            Write-Host ('got    rdp.ps1  ' + (Get-Item $dst).Length + ' B  from the copy next to this script  sha1=' + (Sha1 $dst).Substring(0, 12))
+        }
     }
     Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-    & $wm -Cmd rdp
+    & $dst
     exit $LASTEXITCODE
 }
 
 # ------------------------------------------------------------------ full install
 Write-Host '== scripts =='
 $got = @{}
-foreach ($n in @('_winterm.ps1')) { $got[$n] = Place $n $tool }
+foreach ($n in @('rdp.ps1', '_winterm.ps1')) { $got[$n] = Place $n $tool }
 
-# ---- retired: the WebSocket bridge and everything that kept it running ----
-# Remote Desktop goes over the Tailscale tailnet now, so the 13389 bridge, its logon task and its
-# startup entry are all dead weight. Removing them is what makes an upgraded computer behave like a
-# fresh one; the folder itself is left in place in case it still holds something worth looking at.
-$sl = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\kun9-bridge.lnk'
-if (Test-Path $sl) { Remove-Item $sl -Force; Write-Host 'clean  startup entry kun9-bridge.lnk removed' }
-try {
-    if (Get-ScheduledTask -TaskName 'kun9_rdp_bridge' -EA SilentlyContinue) {
-        Unregister-ScheduledTask -TaskName 'kun9_rdp_bridge' -Confirm:$false -ErrorAction Stop
-        Write-Host 'clean  logon task kun9_rdp_bridge removed'
-    }
-} catch { Write-Host ('clean  kun9_rdp_bridge could not be removed: ' + (($_.Exception.Message) -split "`r?`n")[0]) }
-$stale = @(Get-Content (Join-Path $env:WINDIR 'System32\drivers\etc\hosts') -EA SilentlyContinue | Where-Object { $_ -match 'rdp\.kun9\.ccwu\.cc' })
-if ($stale.Count) {
-    Write-Host ('note   hosts still carries ' + $stale.Count + ' old rdp.kun9.ccwu.cc line(s). They are harmless but pointless now;')
-    Write-Host ('       to drop them: open ' + (Join-Path $env:WINDIR 'System32\drivers\etc\hosts') + ' in Notepad as Administrator and delete those lines.')
+# rdp.ps1 must also sit where the logon task looks for it
+$src = Join-Path $tool 'rdp.ps1'
+if (Test-Path $src) {
+    if (-not (Test-Path $rdpDir)) { New-Item -ItemType Directory -Path $rdpDir -Force | Out-Null }
+    $d2 = Join-Path $rdpDir 'rdp.ps1'
+    if (-not (Test-Path $d2) -or (Sha1 $src) -ne (Sha1 $d2)) {
+        Copy-Item $src $d2 -Force; Write-Host 'sync   kun9_rdp\rdp.ps1'
+    } else { Write-Host 'sync   kun9_rdp\rdp.ps1 already same' }
 }
-if (Test-Path $rdpDir) { Write-Host ('note   ' + $rdpDir + ' is no longer read by anything; keep or delete it as you like') }
 
 Write-Host '== keys =='
-# None of these may be committed anywhere: pat.txt IS the GitHub token, wt_priv.xml unseals every
-# session password, ts_key.txt opens the tailnet. They travel in the 密钥-换电脑拷走 folder next to
-# this script (ts_key.txt also exists as the WT_TS_KEY Actions secret -- this copy is the offline
-# backup you overwrite when the key is renewed).
+# These four cannot live in the cloud: pat.txt IS the GitHub token and wt_priv.xml unseals every
+# session password. They travel in the 密钥-换电脑拷走 folder next to this script.
 foreach ($n in $Keys) {
     $dst = Join-Path $tool $n
     $found = $null
