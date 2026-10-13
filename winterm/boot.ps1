@@ -184,8 +184,12 @@ $ENDS = (Get-Date).ToUniversalTime().AddSeconds($SECS).ToString('yyyy-MM-ddTHH:m
 
 # ---- browser terminal over an HTTP quick tunnel: works with no setup at all ----
 Start-Ttyd
-Start-Sleep -Seconds 5
-$TTYD_ORIGIN = OriginCode 7681
+$TTYD_ORIGIN = 0
+for ($i = 0; $i -lt 10; $i++) {
+  Start-Sleep -Seconds 2
+  $TTYD_ORIGIN = OriginCode 7681
+  if ($TTYD_ORIGIN -ne 0) { break }
+}
 Write-Host ('ttyd origin -> ' + $TTYD_ORIGIN + '  pids=' + ((Get-Process ttyd -EA SilentlyContinue).Id -join ','))
 Write-Host ('ttyd.err tail: ' + (Tail (Join-Path $work 'ttyd.err') 8))
 Start-Cf 'http://127.0.0.1:7681' (Join-Path $work 'cf.log')
@@ -267,13 +271,28 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
   $code = OriginCode 7681
   $changed = $false
 
-  if ($code -eq 0 -or $TTYN -eq 0) {
+  $gone = ($TTYN -eq 0)
+  if (-not $gone -and $code -eq 0) {
+    # One missed probe is not a dead ttyd: while a client is streaming, its HTTP loop can be busy
+    # past the 6s timeout, and killing it there drops the live session and leaves the edge at 502.
+    # So the miss has to repeat before we pull the trigger.
+    Start-Sleep -Seconds 3
+    $code = OriginCode 7681
+    if ($code -eq 0) { $gone = $true }
+  }
+  if ($gone) {
     $script:RESTARTS = $RESTARTS + 1
     Write-Host ('ttyd dead (origin=' + $code + ' procs=' + $TTYN + '), restarting #' + $script:RESTARTS)
     Get-Process ttyd -EA SilentlyContinue | Stop-Process -Force
     Start-Ttyd
-    Start-Sleep -Seconds 5
-    $code = OriginCode 7681
+    # Wait for the bind instead of a fixed 5s: a restart is only over once the origin answers,
+    # and every second past that is a second the browser gets 502.
+    foreach ($i in 1..6) {
+      Start-Sleep -Seconds 2
+      $code = OriginCode 7681
+      if ($code -ne 0) { break }
+    }
+    $TTYN = (Get-Process ttyd -EA SilentlyContinue | Measure-Object).Count
     $changed = $true
   }
 
