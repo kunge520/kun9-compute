@@ -134,14 +134,10 @@ function Invoke-Console($preset) {
     if (-not $s.url) { Write-Host ('no console url in this session: ' + $s.note); exit 1 }
     $cp = ''
     try { $cp = Unseal $s.cipher } catch { Write-Host 'cannot unseal the console password (wt_priv.xml missing or old?)'; exit 1 }
+    # ttyd's basic auth is case-SENSITIVE (measured: administrator=200, Administrator=401), and the
+    # VM is the one that started it, so the login printed here is the one the heartbeat carries --
+    # not the one in wt_rdp_login.txt, whose first line is the old Windows account name.
     $lu = "$($s.user)"; if (-not $lu) { $lu = 'administrator' }
-    # wt_rdp_login.txt is the login the user keeps forever (the file name predates the change);
-    # when it exists the browser can autofill the same pair on every machine.
-    $lf = Join-Path $env:LOCALAPPDATA 'gh_tools\wt_rdp_login.txt'
-    if (Test-Path $lf) {
-        $lv = @(Get-Content $lf | Where-Object { "$_".Trim() })
-        if ($lv.Count -ge 2) { $lu = "$($lv[0])".Trim(); $cp = "$($lv[1])".Trim() }
-    }
 
     # Normally boot.ps1 already started the named connector from the WT_TUNNEL_TOKEN secret. If this
     # VM came up without it, hand the token in through the repo: encrypt to the ephemeral key the VM
