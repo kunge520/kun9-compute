@@ -56,8 +56,11 @@ export default {
       if (!env.PANEL_KEY || String(given || '') !== String(env.PANEL_KEY)) {
         return send(page('口令不对', '登录'), 'text/html', 401);
       }
-      return send('', 'text/plain', 204, {
+      // 302 back to the panel: a form post that answers 204 leaves the browser on a blank page,
+      // and 进入 looks like it did nothing.
+      return send('', 'text/plain', 302, {
         'Set-Cookie': COOKIE + '=' + await sig(env) + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000',
+        Location: '/',
       });
     }
     if (url.pathname === '/logout') {
