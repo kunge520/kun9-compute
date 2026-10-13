@@ -1,4 +1,6 @@
-# Windows VM boot script: browser terminal + RDP, self-configuring from repo secrets.
+# Windows VM boot script: browser console (ttyd) only, self-configuring from repo secrets.
+# 2026-10-14: the remote-desktop half is gone -- no 3389 listener, no fleet account, no portproxy,
+# and nothing on the local box forwards 13389 any more. One URL, one login, in the browser.
 # Kept out of the workflow YAML on purpose: GitHub refuses to parse a step whose run block is
 # over the 21000-character expression limit (measured: Exceeded max expression length 21000),
 # which kills the run before any job exists and names the workflow only by its path.
@@ -22,17 +24,14 @@
 # the process exits instantly with "Incorrect Usage", which from the outside looks exactly like
 # a bad tunnel token. --log-level is a root flag and is not accepted by `tunnel` either.
 # - a self_hosted Access app with ZERO policies does not gate the hostname (the edge forwards
-# straight to the connector), and this API version rejects every service_token policy shape
-# ("invalid service_token rule"), so RDP is guarded only by the ephemeral Windows password.
-# - an X.224 Connection Request must be the full 19 bytes (LI 0x0e + RDP_NEG_REQ with 4-byte
-# requestedProtocols). The 15-byte short form makes Windows reset the socket, which looks exactly
-# like "the tunnel carries nothing" -- it cost a whole detour through named tunnels to rule out.
+# straight to the connector), so the console is guarded only by ttyd's own basic auth.
 # - git identity must be set before ANY commit, including the failure path.
 # - ttyd.win32.exe was observed Dying mid-session (Cloudflare then answers 502 forever), so the
 # wait is a supervising loop that restarts it and republishes, instead of a blind sleep.
-# - QUICK TUNNELS CARRY HTTP ONLY. Measured locally: a tcp:// quick tunnel registers a hostname and
-# the edge even answers the websocket upgrade, but no bytes ever reach the origin. So RDP (3389)
-# goes through a NAMED tunnel (wt/rdp.kun9.ccwu.cc), which also stops the hostname rotating.
+# - a quick tunnel's hostname rotates every time cloudflared re-dials, which is why the console
+# lives on the NAMED tunnel (wt.kun9.ccwu.cc) whenever the token is available. Quick tunnels also
+# carry HTTP only -- measured: a tcp:// quick tunnel registers a hostname and the edge answers the
+# websocket upgrade, but no bytes ever reach the origin.
 # - the PAT behind this repo has no `secrets` scope, so the tunnel token cannot be an Actions
 # secret. It is handed in through the repo instead: the VM makes an ephemeral RSA key and
 # publishes ONLY the public half; the local client then pushes winterm/inbox.json with the token
@@ -72,7 +71,7 @@ function Tail([string]$f, [int]$n) {
   return ''
 }
 function Start-Ttyd {
-  Start-Process -FilePath (Join-Path $work 'ttyd.exe') -ArgumentList @('-p', '7681', '-W', '-c', ('fleet:' + $PASS), 'cmd') -RedirectStandardOutput (Join-Path $work 'ttyd.out') -RedirectStandardError (Join-Path $work 'ttyd.err') -NoNewWindow
+  Start-Process -FilePath (Join-Path $work 'ttyd.exe') -ArgumentList @('-p', '7681', '-W', '-c', ('administrator:' + $PASS), 'cmd') -RedirectStandardOutput (Join-Path $work 'ttyd.out') -RedirectStandardError (Join-Path $work 'ttyd.err') -NoNewWindow
 }
 function Start-Cf([string]$target, [string]$log) {
   # No --name: with --url this is a quick tunnel and --name belongs to registered ones.
@@ -126,107 +125,6 @@ function ShortTxt([string]$s, [int]$n) {
   return $t
 }
 
-function Set-FixedLogin([string]$user, [string]$pass) {
-  # The user asked for ONE login that never changes: rdp.kun9.ccwu.cc + administrator + their own
-  # password. Two things get in the way on a GitHub runner, and both are measured here rather than
-  # assumed:
-  #  - "password must meet complexity requirements" is on and a 7-digit password fails it. It is
-  #    switched off with a template of our own, because rewriting the exported policy in place is
-  #    not enough -- the key is usually absent from the export altogether.
-  #  - the built-in admin does NOT necessarily answer to "Administrator" on these images (measured:
-  #    Get-LocalUser found no such account), so the RID-500 account is looked up by SID, gets the
-  #    same password under its own name, and the requested name is created when it is free.
-  # The whole attempt log is RETURNED into the heartbeat, because a bare FAILED with no reason cost
-  # a full boot cycle to diagnose -- job logs stay BlobNotFound while the session is live.
-  $log = New-Object Collections.Generic.List[string]
-  $sec = ConvertTo-SecureString $pass -AsPlainText -Force
-  $log += ('names=' + (ShortTxt (((Get-LocalUser -EA SilentlyContinue | ForEach-Object { $_.Name }) -join ',')) 80))
-  Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name LimitBlankPasswordUse -Value 0 -Force -EA SilentlyContinue
-
-  $inf = Join-Path $env:TEMP 'plx.inf'
-  & secedit.exe /export /cfg $inf /quiet 2>$null | Out-Null
-  $t = (Get-Content $inf -Raw -EA SilentlyContinue)
-  $pc = if ($t -match '(?m)^PasswordComplexity\s*=\s*(\d)') { $matches[1] } else { 'absent' }
-  $ml = if ($t -match '(?m)^MinimumPasswordLength\s*=\s*(\d)') { $matches[1] } else { 'absent' }
-  $log += ('cpx=' + $pc + ' minlen=' + $ml)
-
-  $tmpl = Join-Path $env:TEMP 'cpxoff.inf'
-  $slog = Join-Path $env:TEMP 'secedit.log'
-  # secedit refuses a template with no [version] signature (it exits 1 and says nothing on --quiet),
-  # so the exported policy is used as the base and the two keys are injected where they belong.
-  if ($t -and $t -match '(?m)^\[System Access\]') {
-    $b = $t -replace '(?m)^PasswordComplexity\s*=.*$', 'PasswordComplexity = 0'
-    $b = $b -replace '(?m)^MinimumPasswordLength\s*=.*$', 'MinimumPasswordLength = 0'
-    if ($b -notmatch '(?m)^PasswordComplexity') { $b = $b -replace '(?m)^(\[System Access\])', ('$1' + "`r`n" + 'PasswordComplexity = 0') }
-    if ($b -notmatch '(?m)^MinimumPasswordLength') { $b = $b -replace '(?m)^(\[System Access\])', ('$1' + "`r`n" + 'MinimumPasswordLength = 0') }
-  } else {
-    $b = "[version]`r`nsignature=`"`$CHICAGO`"`"`r`n[System Access]`r`nPasswordComplexity = 0`r`nMinimumPasswordLength = 0`r`n"
-  }
-  Set-Content -Path $tmpl -Value $b -Encoding ascii
-  & secedit.exe /configure /db ($env:TEMP + '\cpxoff.sdb') /cfg $tmpl /areas SECURITYPOLICY /log $slog /overwrite /quiet 2>&1 | Out-Null
-  $sc = $LASTEXITCODE
-  & secedit.exe /export /cfg $inf /quiet 2>$null | Out-Null
-  $t2 = (Get-Content $inf -Raw -EA SilentlyContinue)
-  $pc2 = if ($t2 -match '(?m)^PasswordComplexity\s*=\s*(\d)') { $matches[1] } else { 'gone' }
-  $log += ('sec=' + $sc + ' cpx2=' + $pc2 + ' slog=' + (ShortTxt (Tail $slog 4) 46))
-
-  if (-not (Get-LocalUser -Name $user -EA SilentlyContinue)) {
-    $b500 = Get-CimInstance Win32_UserAccount -EA SilentlyContinue | Where-Object { $_.SID -match '-500$' } | Select-Object -First 1
-    if ($b500) {
-      $log += ('rid500=' + (ShortTxt $b500.Name 18) + '/' + [int]($b500.Disabled))
-      if ($b500.Name -ne $user) {
-        try { Set-LocalUser -Name $b500.Name -Password $sec -EA Stop; $log += ('alt=' + (Test-Login $b500.Name $pass)) }
-        catch { $log += ('alt-err:' + (ShortTxt $_.Exception.Message 40)) }
-      }
-    } else { $log += 'rid500=none' }
-    try {
-      New-LocalUser -Name $user -Password $sec -AccountNeverExpires -PasswordNeverExpires -EA Stop | Out-Null
-      $log += ('new=' + (Test-Login $user $pass))
-    } catch { $log += ('new-err:' + (ShortTxt $_.Exception.Message 44)) }
-  }
-
-  $u = Get-LocalUser -Name $user -EA SilentlyContinue
-  if (-not $u) { return 'STILL-no-such-user | ' + ($log -join ' | ') }
-  Enable-LocalUser -Name $user -EA SilentlyContinue
-  try { Set-LocalUser -Name $user -Password $sec -EA Stop } catch { $log += ('set-err:' + (ShortTxt $_.Exception.Message 40)) }
-  try { Set-LocalUser -Name $user -PasswordNeverExpires $true -AccountNeverExpires -EA SilentlyContinue } catch { }
-  Add-LocalGroupMember -Group 'Administrators' -Member $user -EA SilentlyContinue
-  Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $user -EA SilentlyContinue
-
-  $ok = Test-Login $user $pass
-  if ($ok -ne 'ok') {
-    try {
-      $ad = [ADSI]('WinNT://./' + $user + ',user')
-      $ad.SetPassword($pass); $ad.SetInfo(); $ad.PasswordExpires = $false; $ad.SetInfo()
-      $ok = Test-Login $user $pass
-      $log += ('adsi=' + $ok)
-    } catch { $log += ('adsi-err:' + (ShortTxt $_.Exception.Message 40)) }
-  }
-  if ($ok -ne 'ok') {
-    $nu = (& net.exe user $user $pass 2>&1) -join ' '
-    $ok = Test-Login $user $pass
-    $log += ('net=' + $LASTEXITCODE + ':' + (ShortTxt $nu 26) + ' ' + $ok)
-  }
-  $log += ('en=' + [int](Get-LocalUser -Name $user -EA SilentlyContinue).Enabled)
-  $out = ($log -join ' | ')
-  if ($ok -eq 'ok') { return 'OK ' + $out }
-  return 'FAILED ' + $out
-}
-
-function Test-Login([string]$user, [string]$pass) {
-  # Prove the password actually authenticates (LogonUser against the SAM) instead of trusting
-  # that "Set-LocalUser did not throw" means RDP will accept it.
-  if (-not ('L' -as [type]) -and -not ('WinLUA.Helper' -as [type])) {
-    $sig = '[System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError=true)] public static extern bool LogonUser(string u, string d, string p, int l, int w, out System.IntPtr t); [System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool CloseHandle(System.IntPtr h);'
-    Add-Type -Namespace 'WinLUA' -Name 'Helper' -MemberDefinition $sig -EA SilentlyContinue
-  }
-  $tk = [IntPtr]::Zero
-  $ok = $false
-  try { $ok = [WinLUA.Helper]::LogonUser($user, '.', $pass, 3, 0, [ref]$tk) } catch { return 'addtype-err' }
-  if ($ok) { [void][WinLUA.Helper]::CloseHandle($tk); return 'ok' }
-  return 'fail-' + [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-}
-
 function Sync-Head {
   # A previous session.json writer (the run this one replaced, still publishing while it is
   # being cancelled) makes "git pull --rebase" stop mid-way with a conflict, and every later
@@ -244,8 +142,7 @@ function Sync-Head {
 function Publish($extra) {
   $body = @{
     alive = $true; run_id = $env:GITHUB_RUN_ID; check = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-    url = $TTYD_URL; user = 'fleet'; cipher = $TTYD_CT; alg = 'RSA-OAEP-SHA256'
-    rdp_url = $RDP_URL; rdp_user = $RDP_USER; rdp_cipher = $RDP_CT; rdp_fixed = $RDP_FIXED
+    url = $TTYD_URL; user = 'administrator'; cipher = $TTYD_CT; alg = 'RSA-OAEP-SHA256'
     ttl_min = $MIN; opened = $OPENED; ends = $ENDS
     origin_http = "$TTYD_ORIGIN"; restarts = $RESTARTS; cf_procs = $CFN; ttyd_procs = $TTYN
     named_procs = $NPN; named = $NAMED; vm_pub = $VM_PUB; url_quick = $QUICK_URL; inbox_diag = $INBOXDIAG
@@ -276,12 +173,11 @@ $ttydUrl = ($rel.assets | Where-Object { $_.name -like 'ttyd.win*' } | Select-Ob
 Invoke-WebRequest -Uri $ttydUrl -OutFile (Join-Path $work 'ttyd.exe')
 Write-Host ('binaries cf=' + (Get-Item (Join-Path $work 'cf.exe')).Length + 'B ttyd=' + (Get-Item (Join-Path $work 'ttyd.exe')).Length + 'B src=' + $ttydUrl)
 
-# ---- terminal credentials ----
-# The browser terminal shares the remote desktop's one fixed login (WT_RDP_PASS), so there is a single
-# password to remember and no second repo variable. Without that secret both stay per-machine random.
+# ---- console credentials ----
+# One fixed login for the browser console: WT_RDP_PASS (the name predates this -- the secret is now
+# the ttyd password, nothing else). Without it the console gets a per-machine random password.
 $FIXED = "$env:WT_RDP_PASS".Trim()
 $PASS = if ($FIXED) { $FIXED } else { New-Pass }
-$RDP_PASS = if ($FIXED) { $FIXED } else { New-Pass }
 $OPENED = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 $ENDS = (Get-Date).ToUniversalTime().AddSeconds($SECS).ToString('yyyy-MM-ddTHH:mm:ssZ')
 
@@ -303,11 +199,7 @@ if (-not $TTYD_URL) {
   exit 0
 }
 
-# ---- RDP listener on the VM; the tunnel that reaches it is the named one, added later ----
-$rdpNote = ''
-$RDP_URL = ''
-$RDP_USER = 'fleet'
-$RDP_FIXED = ''
+# ---- state the heartbeat carries while the named tunnel is still being picked up ----
 $INBOXDIAG = 'none'
 $BOOTDIAG = 'no-secrets'
 $script:BOOT_TOK = ''
@@ -315,131 +207,13 @@ $NAMED = 'waiting-for-token'
 $NPN = 0
 $script:lastBlob = ''
 $namedStable = $false
-try {
-  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -Force
-  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0 -Force -EA SilentlyContinue
-  # SecurityLayer 1 = TLS without NLA. Layer 0 ("standard RDP security") is what a plain mstsc gets
-  # today from this image, and it dies mid-handshake: the client and server complete X.224 and MCS
-  # setup, then the server stops answering the join for the user channel (1004). TLS is the layer
-  # every Windows client actually wants, and leaving UserAuthentication at 0 keeps CredSSP -- and its
-  # encryption-oracle/self-signed-cert refusals on a workgroup machine -- out of the picture.
-  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name SecurityLayer -Value 1 -Force -EA SilentlyContinue
-  # a WinStation can be listening while switched off, which shows up the same way
-  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name fEnableWinStation -Value 1 -Force -EA SilentlyContinue
-  # A Group Policy SecurityLayer/UserAuthentication beats the WinStations values, and the runner image
-  # can carry one. Write the same numbers into the policy key so "effective" and "what we read back" agree.
-  $pol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
-  if (-not (Test-Path $pol)) { New-Item -Path $pol -Force | Out-Null }
-  Set-ItemProperty -Path $pol -Name SecurityLayer -Value 1 -Force -EA SilentlyContinue
-  Set-ItemProperty -Path $pol -Name UserAuthentication -Value 0 -Force -EA SilentlyContinue
-  # This is a Windows *client* SKU: console session + one remote session is the hard ceiling, and a
-  # disconnected remote session still holds its slot. With one session per user the next connect rejoins
-  # the session that is already there instead of opening a second one the server then tears down (that
-  # looked like "the client could not establish the transport connection" right after logon).
-  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fSingleSessionPerUser -Value 1 -Force -EA SilentlyContinue
-  # ...and an abandoned session has to give the slot back, or nobody can get in again until the VM dies.
-  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name MaxDisconnectionTime -Value 300000 -Force -EA SilentlyContinue
-  Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name fOverrideMaxDisconnectionTime -Value 1 -Force -EA SilentlyContinue
-  Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -EA SilentlyContinue
-  $sec = ConvertTo-SecureString $RDP_PASS -AsPlainText -Force
-  $existing = Get-LocalUser -Name 'fleet' -EA SilentlyContinue
-  if ($existing) { Set-LocalUser -Name 'fleet' -Password $sec -EA SilentlyContinue } else { New-LocalUser -Name 'fleet' -Password $sec -AccountNeverExpires -PasswordNeverExpires | Out-Null }
-  Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'fleet' -EA SilentlyContinue
-  Add-LocalGroupMember -Group 'Administrators' -Member 'fleet' -EA SilentlyContinue
-  Set-Service TermService -StartupType Manual -EA SilentlyContinue
-  Start-Service TermService -EA SilentlyContinue
-  # Enabling RDP through the registry does NOT retune a listener that is already running:
-  # it keeps denying, and the denial looks like "TCP accepted, then forcibly closed" from
-  # the very first byte. The listener only picks the settings up when it is rebuilt.
-  Restart-Service TermService -Force -EA SilentlyContinue
-  Start-Sleep -Seconds 5
-  # The registry read-back said SecurityLayer=1/UserAuthentication=0 while the listener still answered a
-  # probe with PROTOCOL_HYBRID, i.e. NLA on. Only the terminal server's own WMI provider reports (and
-  # sets) what it actually applied, so drive NLA through it and publish the effective numbers.
-  $GEN = 'err'
-  for ($try = 1; $try -le 2; $try++) {
-    try {
-      $gp = 'root\cimv2\terminalservices'
-      $g = Get-CimInstance -Namespace $gp -ClassName Win32_TSGeneralSetting -Filter "TerminalName='RDP-tcp'" -EA Stop
-      if ([int]$g.UserAuthenticationRequired -ne 0) {
-        # 1 = enable, 2 = disable; the second pass only runs if the first read-back still says required
-        $ua = 2
-        if ($try -eq 2) { $ua = 1 }
-        [void](Invoke-CimMethod -InputObject $g -MethodName SetUserAuthenticationRequirement -Arguments @{ UserAuthentication = $ua } -EA SilentlyContinue)
-      }
-      [void](Invoke-CimMethod -InputObject $g -MethodName SetSecurityLayer -Arguments @{ SecurityLayer = 1 } -EA SilentlyContinue)
-      $g2 = Get-CimInstance -Namespace $gp -ClassName Win32_TSGeneralSetting -Filter "TerminalName='RDP-tcp'" -EA Stop
-      $GEN = 'ua' + [int]$g2.UserAuthenticationRequired + ' sl' + [int]$g2.SecurityLayer + ' enc' + [int]$g2.EncryptionLevel + ' t=' + [int]$try
-      if ([int]$g2.UserAuthenticationRequired -eq 0) { break }
-    } catch { $GEN = 'wmerr:' + ($_.Exception.Message -replace '\s+', ' ').Substring(0, [Math]::Min(40, ($_.Exception.Message -replace '\s+', ' ').Length)) + ' t' + $try }
-  }
-  $owners = ''
-  foreach($e in @(Get-NetTCPConnection -LocalPort 3389 -State Listen -EA SilentlyContinue)) {
-    $pn = ''
-    try { $pn = (Get-Process -Id $e.OwningProcess -EA SilentlyContinue).ProcessName } catch { }
-    $owners = $owners + "$($e.Address):$($e.LocalPort)/$pn "
-  }
-  $listen = (Get-NetTCPConnection -LocalPort 3389 -State Listen -EA SilentlyContinue | Measure-Object).Count
-  # TLS with no NLA needs the listener's own self-signed certificate; if the store is empty the
-  # handshake dies after the X.224 confirm and looks like a dead origin from the client side.
-  $rdpcert = 'err'
-  try {
-    $cd = 'Cert:\LocalMachine\Remote Desktop'
-    if (-not (Test-Path $cd)) { $rdpcert = 'nostore' }
-    else { $cc = @(Get-ChildItem $cd -EA SilentlyContinue); $rdpcert = if ($cc.Count) { $cc.Count } else { 'empty' } }
-  } catch { }
-  $rdpNote = 'TermService=' + (Get-Service TermService -EA SilentlyContinue).Status + ' listeners3389=' + $listen + ' user=' + [bool](Get-LocalUser -Name 'fleet' -EA SilentlyContinue) + ' owners=' + $owners.Trim()
-  $rdpNote = $rdpNote + ' rdpcert=' + $rdpcert + ' gen=' + $GEN
-  if ($listen -ge 1) { $script:RDP_URL = 'https://rdp.kun9.ccwu.cc' } else { $rdpNote = 'NO-3389-LISTENER; ' + $rdpNote }
-  # Does RDP answer a dial from INSIDE the VM? A listener count alone cannot tell a working
-  # terminal server from one that accepts and immediately resets, which is exactly the
-  # difference between "the runner's RDP is broken" and "the tunnel is broken".
-  try {
-    $tc = New-Object Net.Sockets.TcpClient
-    $ar = $tc.BeginConnect('127.0.0.1', 3389, $null, $null)
-    if ($ar.AsyncWaitHandle.WaitOne(5000)) {
-      $tc.EndConnect($ar)
-      $ns = $tc.GetStream(); $ns.ReadTimeout = 6000
-      # 19-byte X.224 CR carrying a well-formed RDP_NEG_REQ that offers PROTOCOL_SSL|PROTOCOL_HYBRID.
-      # Whatever comes back names the layer the listener really picked, which is the one thing the
-      # registry cannot tell us.
-      $cra = [byte[]]@(3, 0, 0, 19, 14, 224, 0, 0, 0, 0, 0, 1, 0, 8, 0, 3, 0, 0, 0)
-      $ns.Write($cra, 0, $cra.Length)
-      $rb = New-Object byte[] 32
-      $n = $ns.Read($rb, 0, 32)
-      if ($n -gt 0) {
-        $rdpNote = $rdpNote + ' loop-x224=' + (($rb[0..($n - 1)] | ForEach-Object { $_.ToString('x2') }) -join ' ')
-        # a NEG_RSP/NEG_FAILURE is the last 8 bytes; type 2 = selected a layer, 3 = refused
-        if ($n -ge 19) { $rdpNote = $rdpNote + ' sel=' + $rb[($n - 8)].ToString('x2') + '/' + $rb[($n - 4)].ToString('x2') + $rb[($n - 3)].ToString('x2') }
-        else { $rdpNote = $rdpNote + ' sel=none' }
-      } else { $rdpNote = $rdpNote + ' loop-x224=closed' }
-    } else { $rdpNote = $rdpNote + ' loop-x224=connect-timeout' }
-    $tc.Close()
-  } catch { $rdpNote = $rdpNote + ' loop-x224=err:' + ($_.Exception.Message -replace '\s+', ' ') }
-  # relay in front of 3389: if the listener is fine but cloudflared's own dial is not,
-  # routing through netsh's portproxy still lands on the same terminal server.
-  & netsh interface portproxy add v4tov4 listenaddress=127.0.0.1 listenport=13389 connectaddress=127.0.0.1 connectport=3389 2>&1 | Out-Null
-  $rdpNote = $rdpNote + ' relay=' + (Get-NetTCPConnection -LocalPort 13389 -State Listen -EA SilentlyContinue | Measure-Object).Count
-  $l13 = (Get-NetTCPConnection -LocalPort 13389 -State Listen -EA SilentlyContinue | Measure-Object).Count
-  if ($l13 -ge 1) { $script:RDP_URL = 'https://rdp.kun9.ccwu.cc' }
-} catch { $rdpNote = 'rdp enable failed: ' + $_.Exception.Message }
-Write-Host ('rdp setup: ' + $rdpNote)
 
 $TTYD_CT = Seal $PASS
-$RDP_CT = if ($RDP_URL) { Seal $RDP_PASS } else { '' }
 
 # ---- boot-time self-configuration ----
-# The token and the login the user wants live in repo Actions secrets (write-only, never in
-# the tree), so a fresh VM is RDP-ready the moment it comes up: no local box has to hand
-# anything in first, and a scheduled or manual start works just as well as a triggered one.
-if ($env:WT_RDP_PASS) {
-  $script:RDP_USER = 'Administrator'
-  $script:RDP_FIXED = Set-FixedLogin 'Administrator' $env:WT_RDP_PASS
-  $RDP_CT = Seal $env:WT_RDP_PASS
-  $lt = Test-Login 'Administrator' $env:WT_RDP_PASS
-  $rdpNote = $rdpNote + ' fixed[Administrator]=' + $script:RDP_FIXED + ' login-test=' + $lt
-  Write-Host ('fixed login at boot: ' + $script:RDP_FIXED + ' test=' + $lt)
-}
+# The tunnel token and the console password live in repo Actions secrets (write-only, never in
+# the tree), so a fresh VM is reachable in the browser the moment it comes up: no local box has
+# to hand anything in first, and a manual start works just as well as a triggered one.
 if ($env:WT_TUNNEL_TOKEN) {
   $script:BOOT_TOK = "$env:WT_TUNNEL_TOKEN".Trim()
   $script:INBOXDIAG = 'boot: token_len=' + $BOOT_TOK.Length + ' pass_len=' + ("$env:WT_RDP_PASS").Length
@@ -461,35 +235,12 @@ if ($env:WT_TUNNEL_TOKEN) {
   Write-Host ('named at boot: ' + $NAMED)
 } elseif ($BOOTDIAG -eq 'no-secrets') { $script:BOOTDIAG = 'WT_TUNNEL_TOKEN secret missing' }
 
-function RdpDiag {
-  # The client only ever sees "the session died seconds after logon", and nothing in the X.224 handshake
-  # says why. The server-side logs, the session table and the live WinStation limits do, so they ride
-  # along in the heartbeat note instead of needing a shell on the box.
-  $s = ''
-  foreach ($p in @(@('lsm', 'Microsoft-Windows-TerminalServices-LocalSessionManager/Operational', 6),
-                   @('core', 'Microsoft-Windows-TerminalServices-RdpCoreTS/Operational', 6))) {
-    try {
-      $ev = @(Get-WinEvent -LogName $p[1] -MaxEvents $p[2] -EA SilentlyContinue)
-      $s += ' ' + $p[0] + '=' + $(if ($ev.Count) { (($ev | ForEach-Object { $_.Id + '@' + $_.TimeCreated.ToString('HHmm') }) -join ',') } else { 'none' })
-    } catch { $s += ' ' + $p[0] + '=err' }
-  }
-  $q = (& query.exe user 2>&1) -join ' '
-  $s += ' q=' + (ShortTxt $q 120)
-  try {
-    $t = Get-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -EA SilentlyContinue
-    $w = Get-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -EA SilentlyContinue
-    $s += ' sspu=' + $t.fSingleSessionPerUser + ' mdt=' + $w.MaxDisconnectionTime + 'o' + $w.fOverrideMaxDisconnectionTime +
-          ' sec=' + $w.SecurityLayer + '/' + $w.UserAuthentication
-  } catch { $s += ' reg=err' }
-  return $s
-}
-
 $CF_WANT = 1
 $script:RESTARTS = 0
 $CFN = (Get-Process cf -EA SilentlyContinue | Measure-Object).Count
 $TTYN = (Get-Process ttyd -EA SilentlyContinue | Measure-Object).Count
 $NPN = (Get-Process cfn -EA SilentlyContinue | Measure-Object).Count
-Publish @{ note = ($rdpNote + (RdpDiag)) }
+Publish @{ note = ('ttyd origin=' + $TTYD_ORIGIN + ' procs=' + $TTYN) }
 
 # ---- supervise: keep ttyd + quick tunnel alive, and pick up the named-tunnel token ----
 $until = (Get-Date).ToUniversalTime().AddSeconds($SECS)
@@ -527,24 +278,15 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
         if ($plain) {
           Write-Host 'inbox: starting named tunnel'
           $script:lastBlob = $ib.blob
-          # the sealed payload is JSON now: tunnel token plus the login the user wants to keep
+          # the sealed payload is JSON: the named-tunnel token
           $job = $null
           $pp = "$plain".Trim([char]0xFEFF, ' ', "`t", "`r", "`n")
           try { $job = $pp | ConvertFrom-Json } catch { }
           $tok = $pp
           if ($job -and $job.t) { $tok = "$($job.t)".Trim() }
           elseif ($pp -match '"t"\s*:\s*"([^"]+)"') { $tok = $matches[1] }
-          $script:INBOXDIAG = 'json=' + $(if ($job) { 'ok' } else { 'no' }) + ' tlen=' + $tok.Length + ' thist=' + $tok.Substring(0, [Math]::Min(6, $tok.Length)) + ' plen=' + $pp.Length + ' phas=' + [bool]($job -and $job.p)
+          $script:INBOXDIAG = 'json=' + $(if ($job) { 'ok' } else { 'no' }) + ' tlen=' + $tok.Length + ' thist=' + $tok.Substring(0, [Math]::Min(6, $tok.Length)) + ' plen=' + $pp.Length
           Write-Host ('inbox diag ' + $script:INBOXDIAG)
-          if ($job -and $job.p) {
-            $fu = 'Administrator'
-            if ($job.u) { $fu = "$($job.u)" }
-            $script:RDP_USER = $fu
-            $script:RDP_FIXED = Set-FixedLogin $fu "$($job.p)"
-            $script:RDP_CT = Seal "$($job.p)"
-            $rdpNote = $rdpNote + ' fixed[' + $fu + ']=' + $script:RDP_FIXED + ' login-test=' + (Test-Login $fu "$($job.p)")
-            Write-Host ('fixed login ' + $fu + ' -> ' + $script:RDP_FIXED + ' test=' + (Test-Login $fu "$($job.p)"))
-          }
           Start-Named $tok
           for ($i = 0; $i -lt 12; $i++) {
             Start-Sleep -Seconds 3
@@ -567,8 +309,7 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
   }
 
   if ($namedStable) {
-    $l2 = (Get-NetTCPConnection -LocalPort 3389 -State Listen -EA SilentlyContinue | Measure-Object).Count
-    $script:NAMED = 'running listeners3389=' + $l2
+    $script:NAMED = 'running'
     if ($NPN -eq 0) {
       # hostnames are fixed now, so re-running the same token restores the very same URLs
       $rt = $script:BOOT_TOK
@@ -597,12 +338,12 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
 
   $TTYD_ORIGIN = $code
   if ($changed -or ((Get-Date) - $lastPublish).TotalSeconds -ge 60) {
-    Publish @{ note = ($rdpNote + (RdpDiag)) }
+    Publish @{ note = ('ttyd origin=' + $TTYD_ORIGIN + ' procs=' + $TTYN) }
     $lastPublish = Get-Date
   }
 }
 
-$dead = @{ alive = $false; url = $TTYD_URL; rdp_url = $RDP_URL; closed = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); run_id = $env:GITHUB_RUN_ID; restarts = $script:RESTARTS; named = $NAMED } | ConvertTo-Json -Compress
+$dead = @{ alive = $false; url = $TTYD_URL; closed = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); run_id = $env:GITHUB_RUN_ID; restarts = $script:RESTARTS; named = $NAMED } | ConvertTo-Json -Compress
 Sync-Head
 Set-Content -Path (Join-Path $work 'winterm/session.json') -Value $dead -Encoding ascii
 git add -f winterm/session.json
