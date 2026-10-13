@@ -350,6 +350,13 @@ if (-not $NoMstsc) {
         exit 1
     }
     L ('client ' + $cli)
-    Start-Process $cli -ArgumentList ('"' + $rdp + '"')
+    # mstsc only honours the .rdp file when Windows has a .rdp association for it; a restored or copied
+    # mstsc.exe usually has none and then silently reopens its last-used address. /v: overrides the
+    # address while keeping the file's bandwidth settings. msrdc does not parse /v: at all.
+    if ((Split-Path $cli -Leaf) -eq 'mstsc.exe') {
+        Start-Process $cli -ArgumentList @('"' + $rdp + '"', '/v:' + $addr)
+    } else {
+        Start-Process $cli -ArgumentList ('"' + $rdp + '"')
+    }
 }
 exit 0
