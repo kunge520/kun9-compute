@@ -269,20 +269,24 @@ async function status(env) {
   else out.error = '读任务列表失败（GitHub 限流或未响应）';
   const s = await session();
   if (s) {
+    // raw answers with max-age=300, so the file can still be the previous run's alive:true for
+    // minutes after that machine was released -- and as soon as a new run is live the old check
+    // timestamp stops meaning anything. Only the record of the run that is actually live may claim
+    // a machine; anything else is a leftover, and 打开终端 on it leads to a 530. A runner killed by
+    // a cancel never writes alive:false either, so a heartbeat older than three cycles is dead too.
+    const mine = !(r && r.live) || String(s.run_id || '') === String(r.live);
     // session.json also carries the sealed console password and log tails; the panel needs none of
     // that, so only the fields it displays leave the edge.
     out.vm = {
-      // A cancelled runner is killed mid-breath and never writes alive:false, so a heartbeat
-      // older than three cycles means the box is gone even though the file still says alive.
-      alive: s.alive === true && (fresh(s.check, 180) || !!(r && r.live)),
+      alive: mine && s.alive === true && (fresh(s.check, 180) || !!(r && r.live)),
       url: s.url || '',
-      user: s.user || '',
-      ends: s.ends || '',
+      user: mine ? (s.user || '') : '',
+      ends: mine ? (s.ends || '') : '',
       check: s.check || '',
-      note: s.note || '',
+      note: mine ? (s.note || '') : '',
       named: s.named || '',
       run_id: s.run_id || '',
-      restarts: s.restarts,
+      restarts: mine ? s.restarts : 0,
       ttl_min: s.ttl_min,
       closed: s.closed || '',
     };
