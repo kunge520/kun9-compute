@@ -249,15 +249,18 @@ $lastPublish = Get-Date
 while ((Get-Date).ToUniversalTime() -lt $until) {
   Start-Sleep -Seconds 20
 
-  # the panel's stop button only sets a flag; we are the ones who read it and leave. Returning
-  # from here ends the run, which is what actually frees the runner.
+  # Panel stop: the control panel only writes a flag, this loop is the one that reads it and
+  # leaves, which is what actually releases the runner. The Worker answers in a few hundred
+  # bytes, so asking every 20s costs the free minutes nothing. A run that cannot reach the panel
+  # must keep working, so the whole poll is best-effort.
   try {
-    if ((Invoke-RestMethod -Uri ($CTL + '/api/power') -TimeoutSec 8).action -eq 'stop') {
+    $ask = Invoke-RestMethod -Uri ($CTL + '/api/power') -TimeoutSec 8
+    if ($ask -and $ask.action -eq 'stop') {
       Invoke-RestMethod -Uri ($CTL + '/api/power/clear') -Method Post -TimeoutSec 8 | Out-Null
       Write-Host 'panel asked for stop, exiting'
       break
     }
-  } catch { Write-Host ('panel poll failed: ' + $_.Exception.Message) }
+  } catch { }
   $TTYN = (Get-Process ttyd -EA SilentlyContinue | Measure-Object).Count
   $CFN = (Get-Process cf -EA SilentlyContinue | Measure-Object).Count
   $NPN = (Get-Process cfn -EA SilentlyContinue | Measure-Object).Count
