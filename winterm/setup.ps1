@@ -31,7 +31,7 @@ $Mx  = 'https://ch.kun9.ccwu.cc/mxd/'
 
 # local name -> repo file, relay file, pinned sha1 ('' = nothing pinned yet)
 $Pin = @{
-    '_winterm.ps1' = @{ gh = 'winterm.ps1'; mx = 'rig_gh_winterm.txt'; sha = '50d7f2f0258457e40a1e7f15fe77f1ac3c2cc4b5' }
+    '_winterm.ps1' = @{ gh = 'winterm.ps1'; mx = 'rig_gh_winterm.txt'; sha = '5c2cb5855b60cbd8e6afc79b240b049fa230412c' }
 }
 
 $tool = Join-Path $env:LOCALAPPDATA 'gh_tools'
