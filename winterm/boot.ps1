@@ -463,8 +463,8 @@ if ($env:WT_TUNNEL_TOKEN) {
 
 # ---- Tailscale: the tailnet is how Remote Desktop reaches this box ----
 # Silent install, join with the pre-auth key from the WT_TS_KEY secret, publish the 100.x address.
-# The key travels in the environment only (never argv, never printed) and the node is ephemeral, so
-# it drops out of the tailnet by itself when the runner goes away.
+# The key travels in the environment only (never argv, never printed). Tick "ephemeral" on the key in
+# the Tailscale admin if you want the device entry to disappear when the runner goes away.
 function Start-Tailnet([string]$Key) {
   $cli = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
   if (-not (Test-Path $cli)) {
@@ -478,7 +478,8 @@ function Start-Tailnet([string]$Key) {
   & netsh advfirewall firewall add rule name=winterm-tailnet-rdp dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10 2>&1 | Out-Null
   $script:TS_NAME = 'gh-' + (([Guid]::NewGuid()).ToString('N')).Substring(0, 6)
   $env:TS_AUTHKEY = $Key
-  $out = ((& $cli up ('--hostname=' + $TS_NAME) --ephemeral 2>&1) | Out-String)
+  # no --ephemeral: 1.104 removed that flag (nodes are marked ephemeral on the key instead, in the admin)
+  $out = ((& $cli up ('--hostname=' + $TS_NAME) 2>&1) | Out-String)
   Remove-Item env:TS_AUTHKEY -Force -EA SilentlyContinue
   $rc = $LASTEXITCODE
   for ($i = 0; $i -lt 15; $i++) {
@@ -489,10 +490,11 @@ function Start-Tailnet([string]$Key) {
   if ($TS_IP) {
     $script:TSDIAG = 'up as ' + $TS_NAME
   } else {
-    # the two failure the user can act on: the key aged out (90 days) or the key was never valid
+    # only call it a key problem when the server actually said so -- otherwise the client would tell
+    # the user to renew a key that is fine
     $why = ShortTxt $out 180
-    if ($out -match '(?i)expired') { $script:TSDIAG = 'KEY-EXPIRED exit=' + $rc + ' ' + $why }
-    elseif ($out -match '(?i)invalid|bad.?auth|not.?allowed|authkey|untagged') { $script:TSDIAG = 'KEY-REJECTED exit=' + $rc + ' ' + $why }
+    if ($out -match '(?i)auth key.{0,40}(expired|not valid|invalid)|key.{0,20}expired') { $script:TSDIAG = 'KEY-EXPIRED exit=' + $rc + ' ' + $why }
+    elseif ($out -match '(?i)bad.?auth|invalid authkey|authkey.{0,30}(invalid|rejected)|not allowed') { $script:TSDIAG = 'KEY-REJECTED exit=' + $rc + ' ' + $why }
     else { $script:TSDIAG = 'no-ip exit=' + $rc + ' ' + $why }
   }
   Write-Host ('tailscale: ' + $TSDIAG + ' ip=' + $TS_IP)
