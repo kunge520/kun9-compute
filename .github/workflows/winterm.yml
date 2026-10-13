@@ -11,6 +11,10 @@ name: winterm
 # The named-tunnel token and the login the user asked to keep fixed are repository Actions secrets
 # (WT_TUNNEL_TOKEN, WT_RDP_PASS), so a fresh VM configures itself at boot: nothing has to be handed
 # in from another machine first, and a start triggered by anyone -- including a schedule -- works.
+# WT_TS_KEY is the Tailscale pre-auth key (reusable, expires after 90 days) that puts the VM straight
+# into the tailnet, which is now the only way Remote Desktop reaches it; boot.ps1 skips that whole
+# section when the secret is empty and says so in the heartbeat, so an old checkout still boots the
+# same way it always did.
 
 on:
   push:
@@ -33,7 +37,8 @@ jobs:
         env:
           WT_TUNNEL_TOKEN: ${{ secrets.WT_TUNNEL_TOKEN }}
           WT_RDP_PASS: ${{ secrets.WT_RDP_PASS }}
+          WT_TS_KEY: ${{ secrets.WT_TS_KEY }}
         run: |
-          Write-Host ('token_len=' + $env:WT_TUNNEL_TOKEN.Length + ' pass_len=' + $env:WT_RDP_PASS.Length)
+          Write-Host ('token_len=' + $env:WT_TUNNEL_TOKEN.Length + ' pass_len=' + $env:WT_RDP_PASS.Length + ' ts_key_len=' + $env:WT_TS_KEY.Length)
           & .\winterm\boot.ps1
           Write-Host ('boot.ps1 returned ' + $LASTEXITCODE)
