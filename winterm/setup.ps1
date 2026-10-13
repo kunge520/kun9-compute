@@ -37,7 +37,7 @@ $Pin = @{
 $tool = Join-Path $env:LOCALAPPDATA 'gh_tools'
 $rdpDir = Join-Path $env:LOCALAPPDATA 'kun9_rdp'
 if (-not (Test-Path $tool)) { New-Item -ItemType Directory -Path $tool -Force | Out-Null }
-$Keys = @('pat.txt', 'wt_priv.xml', 'wt_rdp_login.txt', 'wt_tunnel_token.txt')
+$Keys = @('pat.txt', 'wt_priv.xml', 'wt_rdp_login.txt', 'wt_tunnel_token.txt', 'ts_key.txt')
 
 function Sha1($p) { (Get-FileHash -Path $p -Algorithm SHA1).Hash.ToLower() }
 function A($s) { ('' + $s) -replace '[^\x20-\x7e]', '?' }
@@ -162,8 +162,10 @@ if ($stale.Count) {
 if (Test-Path $rdpDir) { Write-Host ('note   ' + $rdpDir + ' is no longer read by anything; keep or delete it as you like') }
 
 Write-Host '== keys =='
-# These four cannot live in the cloud: pat.txt IS the GitHub token and wt_priv.xml unseals every
-# session password. They travel in the 密钥-换电脑拷走 folder next to this script.
+# None of these may be committed anywhere: pat.txt IS the GitHub token, wt_priv.xml unseals every
+# session password, ts_key.txt opens the tailnet. They travel in the 密钥-换电脑拷走 folder next to
+# this script (ts_key.txt also exists as the WT_TS_KEY Actions secret -- this copy is the offline
+# backup you overwrite when the key is renewed).
 foreach ($n in $Keys) {
     $dst = Join-Path $tool $n
     $found = $null
