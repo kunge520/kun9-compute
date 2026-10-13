@@ -31,7 +31,7 @@ $Mx  = 'https://ch.kun9.ccwu.cc/mxd/'
 
 # local name -> repo file, relay file, pinned sha1 ('' = nothing pinned yet)
 $Pin = @{
-    'rdp.ps1'      = @{ gh = 'rdp.ps1';     mx = 'rig_rdp.txt';        sha = '4e6b137268914dd98bad0031aa9a4e173872db15' }
+    'rdp.ps1'      = @{ gh = 'rdp.ps1';     mx = 'rig_rdp.txt';        sha = 'e508802d37ed93d988dc14a0b5f06ed8a8a9ae64' }
     '_winterm.ps1' = @{ gh = 'winterm.ps1'; mx = 'rig_gh_winterm.txt'; sha = 'bca93514fd52acbc9c2afdb471762764b49c7acc' }
 }
 
