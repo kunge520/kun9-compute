@@ -72,7 +72,25 @@ function Tail([string]$f, [int]$n) {
   return ''
 }
 function Start-Ttyd {
-  Start-Process -FilePath (Join-Path $work 'ttyd.exe') -ArgumentList @('-p', '7681', '-W', '-c', ('administrator:' + $PASS), 'cmd') -RedirectStandardOutput (Join-Path $work 'ttyd.out') -RedirectStandardError (Join-Path $work 'ttyd.err') -NoNewWindow
+  # One out/err pair per start. Reusing ttyd.err is what hid the deaths: a wedged instance still
+  # holds the file handle, the redirect then fails, and the replacement dies before it can write a
+  # word -- an empty error log next to a machine that answers nothing.
+  $script:TTYD_N = $TTYD_N + 1
+  $script:TTYD_ERR = Join-Path $work ('ttyd-' + $script:TTYD_N + '.err')
+  Start-Process -FilePath (Join-Path $work 'ttyd.exe') -ArgumentList @('-p', '7681', '-W', '-c', ('administrator:' + $PASS), 'cmd') -RedirectStandardOutput (Join-Path $work ('ttyd-' + $script:TTYD_N + '.out')) -RedirectStandardError $script:TTYD_ERR -NoNewWindow
+}
+function Free-Port([int]$p) {
+  # A ttyd that is alive but wedged still owns 7681, and a fresh one cannot bind over it. Counting
+  # processes is not enough to clear that: take the socket's owner down by pid.
+  try {
+    foreach ($c in (Get-NetTCPConnection -LocalPort $p -State Listen -EA SilentlyContinue)) {
+      $opid = [int]$c.OwningProcess
+      if ($opid -gt 0) {
+        Write-Host ('port ' + $p + ' held by pid ' + $opid + ', releasing')
+        Stop-Process -Id $opid -Force -EA SilentlyContinue
+      }
+    }
+  } catch { }
 }
 function Start-Cf([string]$target, [string]$log) {
   # No --name: with --url this is a quick tunnel and --name belongs to registered ones.
@@ -148,7 +166,7 @@ function Publish($extra) {
     origin_http = "$TTYD_ORIGIN"; restarts = $RESTARTS; cf_procs = $CFN; ttyd_procs = $TTYN
     named_procs = $NPN; named = $NAMED; vm_pub = $VM_PUB; url_quick = $QUICK_URL; inbox_diag = $INBOXDIAG
     boot_diag = $BOOTDIAG
-    tail_err = (Tail (Join-Path $work 'ttyd.err') 3); cf_tail = (Tail (Join-Path $work 'cf.log') 2)
+    tail_err = (Tail $TTYD_ERR 3); cf_tail = (Tail (Join-Path $work 'cf.log') 2)
     cfn_tail = ((Tail (Join-Path $work 'cfn.log') 2) + ' || ' + (Tail (Join-Path $work 'cfn.err') 4))
   }
   foreach ($k in $extra.Keys) { $body[$k] = $extra[$k] }
@@ -284,6 +302,7 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
     $script:RESTARTS = $RESTARTS + 1
     Write-Host ('ttyd dead (origin=' + $code + ' procs=' + $TTYN + '), restarting #' + $script:RESTARTS)
     Get-Process ttyd -EA SilentlyContinue | Stop-Process -Force
+    Free-Port 7681
     Start-Ttyd
     # Wait for the bind instead of a fixed 5s: a restart is only over once the origin answers,
     # and every second past that is a second the browser gets 502.
