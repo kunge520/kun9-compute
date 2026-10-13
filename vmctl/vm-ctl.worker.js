@@ -43,11 +43,11 @@ export default {
       // the few minutes between claim and boot, and drop it the moment the boot is real.
       if (env.STORE && (await env.STORE.get('booting'))) await env.STORE.delete('booting');
       const q = await read(env, 'power');
-      return send(JSON.stringify({ action: q && q.action === 'stop' ? 'stop' : 'none' }), 'application/json');
+      return send(JSON.stringify({ action: q && (q.action === 'stop' || q.action === 'ttyd') ? q.action : 'none' }), 'application/json');
     }
     if (req.method === 'POST' && url.pathname === '/api/power/clear') {
       const q = await read(env, 'power');
-      if (q && q.action === 'stop') await env.STORE.delete('power');
+      if (q && (q.action === 'stop' || q.action === 'ttyd')) await env.STORE.delete('power');
       await env.STORE.delete('booting');
       return send(JSON.stringify({ ok: true }), 'application/json');
     }
@@ -94,7 +94,19 @@ export default {
 
     if (req.method === 'POST' && url.pathname === '/api/queue') {
       const want = String((await readJson(req)).action || '');
-      if (want !== 'start' && want !== 'stop') return send(JSON.stringify({ ok: false, note: 'action 只能是 start 或 stop' }), 'application/json', 400);
+      if (want !== 'start' && want !== 'stop' && want !== 'ttyd') return send(JSON.stringify({ ok: false, note: 'action 只能是 start、stop 或 ttyd' }), 'application/json', 400);
+      if (want === 'ttyd') {
+        // The supervisor's restart branch only ever runs when ttyd really dies, so the panel can ask
+        // a live machine to drop its own terminal. Nothing here touches the user's data: the worst a
+        // forged request does is one short 502 that the machine heals seconds later.
+        const live = await runs(env);
+        const s = await session();
+        if (!(live && live.live) && !(s && s.alive === true && fresh(s.check, 180))) {
+          return send(JSON.stringify({ ok: false, note: '机器没开着，终端没什么可重启的' }), 'application/json', 409);
+        }
+        await env.STORE.put('power', JSON.stringify({ action: 'ttyd', at: new Date().toISOString() }), { expirationTtl: 300 });
+        return send(JSON.stringify({ ok: true, note: '已下发，机器 20 秒内会杀掉终端并自己拉起来' }), 'application/json');
+      }
       if (want === 'start' && await busy(env)) {
         return send(JSON.stringify({ ok: false, note: '已经有机器在跑或正在开机，先关机再说' }), 'application/json', 409);
       }
@@ -366,6 +378,7 @@ function page(title, mode) {
     '<button id="bstart" class="ok">开机</button>' +
     '<button id="bterm" class="term">打开终端</button>' +
     '<button id="bstop" class="stop">关机</button>' +
+    '<button id="bttyd" class="ghost">重启终端</button>' +
     '<a class="log" id="log" href="#" target="_blank">看日志</a>' +
     '</div>' +
     '<div id="msg" class="msg"></div>' +
@@ -394,6 +407,7 @@ function css() {
     'button{flex:1;padding:12px 0;border:0;border-radius:10px;font-size:15px;font-weight:600;color:#0d1117;cursor:pointer}',
     'button:disabled{opacity:.45;cursor:default}',
     '.ok{background:#3fb950}.stop{background:#f85149;color:#fff}.term{background:#58a6ff}',
+    '.ghost{background:#21262d;color:#c9d1d9}',
     '.log{color:#8b98a5;font-size:13px;text-decoration:none;white-space:nowrap}',
     '.msg{min-height:20px;font-size:13px;color:#d29922;padding:0 4px}',
     '.phase{display:flex;gap:12px;align-items:center}',
@@ -445,6 +459,7 @@ function app() {
     " if(v.url&&/^https:\\/\\//.test(v.url))vu=v.url;",
     " $('log').href=u.url||'https://github.com/kunge520/kun9-compute/actions';",
     " $('bterm').disabled=!alive;",
+    " $('bttyd').disabled=!alive;",
     " $('bstart').disabled=!!(alive||runLive||(q&&q.action==='start'));",
     " $('bstop').disabled=!(alive||runLive)&&!(q&&q.action==='stop');",
     " $('tok').textContent=r.has_token?'已配令牌（秒开机）':'配令牌（可选，秒开机）';",
@@ -455,6 +470,7 @@ function app() {
     "$('bterm').onclick=function(){if(vu)window.open(vu,'_blank')};",
     "$('bstart').onclick=async function(){say('正在排队开机…');var x=await post('/api/queue',{action:'start'});say(x.j.note||(x.j.ok?'已排队':'开机失败：'+x.code));setTimeout(tick,1500)};",
     "$('bstop').onclick=async function(){if(!confirm('确定关机？这台机器上的未保存内容会丢。'))return;say('正在下发关机…');var x=await post('/api/queue',{action:'stop'});say(x.j.note||(x.j.ok?'已下发':'关机失败：'+x.code));setTimeout(tick,1500)};",
+    "$('bttyd').onclick=async function(){if(!confirm('只重启网页终端：机器不动，已打开的终端标签会断几秒。'))return;say('正在下发终端重启…');var x=await post('/api/queue',{action:'ttyd'});say(x.j.note||(x.j.ok?'已下发':'下发失败：'+x.code));setTimeout(tick,3000)};",
     "setInterval(function(){",
     " if(!waiting)return;",
     " var s=wait0?Math.max(0,Math.round((Date.now()-wait0)/1000)):0;",
