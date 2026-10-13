@@ -249,16 +249,20 @@ function Invoke-Rdp($preset) {
         Write-Host '  winget install --id Microsoft.RemoteDesktopClient --accept-package-agreements'
         exit 1
     }
-    # Hand both clients an .rdp file, not a /v: argument. msrdc.exe does not parse /v: the way mstsc
-    # does -- given a bare address it opens its own workspace window and never dials, which looks to the
-    # user like the button did nothing. The password is not in this file: it comes from the cmdkey
-    # entry written above, keyed on the same address.
-    $rdpf = Join-Path $env:TEMP ('kun9_' + ($s.ts_ip -replace '\.', '_') + '.rdp')
-    @(('Full Address:s:' + $s.ts_ip + ':3389'),
-      ('UserName:s:' + $lu),
-      'prompt for credentials:i:0',
-      'authentication level:i:0') -join "`r`n" | Set-Content -Path $rdpf -Encoding ascii
-    Start-Process -FilePath $cli -ArgumentList ('"' + $rdpf + '"')
+    # mstsc supports /v: and ignores the .rdp file if the machine has no .rdp association (a copied
+    # mstsc.exe often has none). msrdc does not parse /v: correctly -- given a bare address it opens
+    # its workspace page and never dials -- so it must keep the .rdp file. Credentials come from the
+    # cmdkey entry written above, not from either file.
+    if ((Split-Path $cli -Leaf) -eq 'mstsc.exe') {
+        Start-Process -FilePath $cli -ArgumentList ('/v:' + $s.ts_ip + ':3389')
+    } else {
+        $rdpf = Join-Path $env:TEMP ('kun9_' + ($s.ts_ip -replace '\.', '_') + '.rdp')
+        @(('Full Address:s:' + $s.ts_ip + ':3389'),
+          ('UserName:s:' + $lu),
+          'prompt for credentials:i:0',
+          'authentication level:i:0') -join "`r`n" | Set-Content -Path $rdpf -Encoding ascii
+        Start-Process -FilePath $cli -ArgumentList ('"' + $rdpf + '"')
+    }
 }
 if ($Cmd -eq 'rdp') { Invoke-Rdp $null; exit }
 
