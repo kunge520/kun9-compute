@@ -1,9 +1,9 @@
 param(
-    [ValidateSet('start', 'stop', 'status', 'rdp')]
+    [ValidateSet('start', 'stop', 'status', 'console')]
     [string]$Cmd = 'start',
     [int]$Minutes = 60,
     [int]$WaitSec = 420,
-    # headless use: no mstsc window, no ttyd probe, and no secrets printed, because whatever
+    # headless use: no browser window, no ttyd probe, and no secrets printed, because whatever
     # this run writes to stdout is meant to be pasted into a chat or saved to a log
     [switch]$NoGui
 )
@@ -82,12 +82,7 @@ function Show($s, $pass) {
     Write-Host ('state      origin_http=' + $s.origin_http + '  restarts=' + $s.restarts + '  checked ' + $s.check)
     if ($s.named) { Write-Host ('tunnel     named=' + $s.named + '  procs=' + $s.named_procs + '  quick=' + $s.cf_procs) }
     if ($s.vm) { Write-Host ('vm         ' + $s.vm + '  cores=' + $s.cores + '  mem=' + $s.mem + '  free_disk=' + $s.free_disk) }
-    if ($s.rdp_url) {
-        $rp = ''
-        try { $rp = Unseal $s.rdp_cipher } catch { $rp = '(decrypt failed)' }
-        if ($script:NOGUI) { Write-Host ('rdp        ' + $s.rdp_url + '   user=' + $s.rdp_user + '  pass=(suppressed)') } else { Write-Host ('rdp        ' + $s.rdp_url + '   user=' + $s.rdp_user + '  pass=' + $rp) }
-        Write-Host ('rdp here   powershell -File %LOCALAPPDATA%\gh_tools\_winterm.ps1 -Cmd rdp')
-    } elseif ($s.note) { Write-Host ('rdp        not available: ' + $s.note) }
+    Write-Host ('console    open it here: powershell -File %LOCALAPPDATA%\gh_tools\_winterm.ps1 -Cmd console')
     Write-Host ('cost       public repo = free hosted Windows runner, no minutes charged')
     Write-Host ('stop       powershell -File %LOCALAPPDATA%\gh_tools\_winterm.ps1 -Cmd stop')
     Write-Host '=============================================='
@@ -125,44 +120,38 @@ function Probe($s, $pass) {
     Write-Host ('probe      ip=' + $ip + '  no-auth=' + $no + '  with-auth=' + $with + '  ttyd_html=' + [bool]($html -match 'ttyd'))
 }
 
-function Invoke-Rdp($preset) {
-    # Remote desktop into the VM. Quick tunnels carry HTTP only (measured: a tcp:// quick tunnel
-    # registers a hostname but no bytes ever reach the origin), so 3389 rides the NAMED tunnel
-    # rdp.kun9.ccwu.cc. Normally nothing has to be handed in at all: winterm.yml passes the tunnel
-    # token and the fixed password in as repo secrets and boot.ps1 starts the connector by itself,
-    # which is why a machine freshly built by -Cmd start is connectable without my help. The inbox
-    # push below is the fallback for a VM that came up without those secrets, and it encrypts to the
-    # ephemeral RSA key the VM published in session.json for exactly this purpose, because the repo
-    # is public. On this side rdp.ps1 is the bridge: a PowerShell WebSocket pump, because the
-    # Cloudflare edge refuses raw TCP 3389 but answers a plain WS upgrade on that hostname.
+function Invoke-Console($preset) {
+    # Open the browser console. There is exactly one way to use the VM now: ttyd served over the
+    # named tunnel (wt.kun9.ccwu.cc), which is a command window in the browser. The remote-desktop
+    # half was dropped on 2026-10-14 -- nothing listens on 3389 on this box, no local port is
+    # forwarded, no hosts entry is written, and the VM never enables Terminal Services at all.
+    # The URL and its password ride session.json, the password sealed with the repo's RSA public
+    # key, so a public repo still hands it only to the box holding wt_priv.xml.
     $raw = if ($preset) { $preset } else { GetRaw ($api + '/contents/' + $sessPath) }
     if (-not $raw) { Write-Host 'no session.json'; exit 1 }
     $s = if ($preset) { $preset } else { $raw | ConvertFrom-Json }
     if (-not $s.alive) { Write-Host ('session is not alive (closed=' + $s.closed + ')'); exit 1 }
-    if (-not $s.rdp_url) { Write-Host ('no rdp in this session: ' + $s.note); exit 1 }
-    if (-not $s.vm_pub) { Write-Host 'this session predates the hand-in box - start a new one'; exit 1 }
-    # ErrorActionPreference is Stop here, so an unseal on a session that never published a ciphertext
-    # would abort with a raw crypto exception instead of the sentence below.
-    if (-not $s.rdp_cipher) { Write-Host ('this session published no RDP credential: ' + $s.note); exit 1 }
-    $rp = Unseal $s.rdp_cipher
-    $hname = ($s.rdp_url -replace '^https://', '')
-    # the login the user asked to keep forever lives in wt_rdp_login.txt and rides to the VM inside the
-    # sealed inbox blob, so it is never written into the public repo in clear text
-    $lu = 'Administrator'; $lp = ''
+    if (-not $s.url) { Write-Host ('no console url in this session: ' + $s.note); exit 1 }
+    $cp = ''
+    try { $cp = Unseal $s.cipher } catch { Write-Host 'cannot unseal the console password (wt_priv.xml missing or old?)'; exit 1 }
+    $lu = "$($s.user)"; if (-not $lu) { $lu = 'administrator' }
+    # wt_rdp_login.txt is the login the user keeps forever (the file name predates the change);
+    # when it exists the browser can autofill the same pair on every machine.
     $lf = Join-Path $env:LOCALAPPDATA 'gh_tools\wt_rdp_login.txt'
     if (Test-Path $lf) {
         $lv = @(Get-Content $lf | Where-Object { "$_".Trim() })
-        if ($lv.Count -ge 2) { $lu = "$($lv[0])".Trim(); $lp = "$($lv[1])".Trim() }
+        if ($lv.Count -ge 2) { $lu = "$($lv[0])".Trim(); $cp = "$($lv[1])".Trim() }
     }
-    if ($lp) { $rp = $lp }
 
+    # Normally boot.ps1 already started the named connector from the WT_TUNNEL_TOKEN secret. If this
+    # VM came up without it, hand the token in through the repo: encrypt to the ephemeral key the VM
+    # published, because the repository itself is public and anything plain in it is readable.
     if ($s.named -notlike 'running*') {
         $tokFile = Join-Path $env:LOCALAPPDATA 'gh_tools\wt_tunnel_token.txt'
         if (-not (Test-Path $tokFile)) { Write-Host ('no tunnel token at ' + $tokFile); exit 1 }
-        if (-not $lp) { Write-Host 'no fixed RDP password in wt_rdp_login.txt'; exit 1 }
-        $payload = @{ t = (Get-Content $tokFile -Raw).Trim(); u = $lu; p = $lp } | ConvertTo-Json -Compress
+        $payload = @{ t = (Get-Content $tokFile -Raw).Trim() } | ConvertTo-Json -Compress
         $env2 = Pack-to-VM $s.vm_pub $payload
-        $inbox = @{ run_id = $s.run_id; note = 'named tunnel token + login'; blob = $env2 } | ConvertTo-Json -Compress -Depth 6
+        $inbox = @{ run_id = $s.run_id; note = 'named tunnel token'; blob = $env2 } | ConvertTo-Json -Compress -Depth 6
         $body = @{ message = ('winterm inbox ' + $s.run_id); content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($inbox)); branch = 'main' }
         try { $body.sha = (GetJ ($api + '/contents/winterm/inbox.json')).sha } catch { }
         try {
@@ -177,36 +166,15 @@ function Invoke-Rdp($preset) {
             if ($s.named -like 'running*') { break }
         }
     }
-    Write-Host ('named      ' + $s.named + '  procs=' + $s.named_procs + '  origin_http=' + $s.origin_http + '  vm=' + $s.note)
-
-    # The bridge is rdp.ps1's own PowerShell WebSocket one now, not cloudflared: the Cloudflare edge
-    # drops raw TCP 3389 but answers an unauthenticated WS upgrade on the tcp-ingress hostname, and
-    # 55 MB of cloudflared is not something to go fetching on every computer. So what is left of this
-    # function is the VM side -- hand in the tunnel token, wait for named=running -- and the client
-    # side is one call to the installed bridge script.
-    $client = Join-Path $env:LOCALAPPDATA 'kun9_rdp\rdp.ps1'
-    if (-not (Test-Path $client)) {
-        $cdir = Split-Path $client
-        if (-not (Test-Path $cdir)) { New-Item -ItemType Directory -Path $cdir -Force | Out-Null }
-        try {
-            Invoke-WebRequest -UseBasicParsing 'https://ch.kun9.ccwu.cc/mxd/rig_rdp.txt' -OutFile $client -TimeoutSec 90
-        } catch { Write-Host ('could not fetch the bridge client: ' + $_.Exception.Message); exit 1 }
-    }
-    # mstsc keys the cached credential on the address as typed, and that address carries a port now.
-    & cmdkey.exe ('/generic:TERMSRV/' + $hname + ':13389') ('/user:' + $lu) ('/pass=' + $rp) 2>&1 | Out-Null
-    & cmdkey.exe ('/generic:TERMSRV/' + $hname) ('/user:' + $lu) ('/pass=' + $rp) 2>&1 | Out-Null
-    Write-Host ('login      ' + $lu + '   address=' + $hname + ':13389   ends ' + $s.ends + '   client=' + $client)
-    # Auto-renew was retired on 2026-10-09 by the user: continuously re-spawning a Windows runner is
-    # "Actions used as a free VPS", the one shape GitHub suspends accounts for, and this box is only
-    # powered on occasionally. Say plainly that the machine has an end time instead of implying it
-    # stays up forever -- double-click shortcut 1 (or -Cmd start) when you want another one.
+    Write-Host ('named      ' + $s.named + '  procs=' + $s.named_procs + '  origin_http=' + $s.origin_http)
+    Write-Host ('console    ' + $s.url + '   user=' + $lu + '   ends ' + $s.ends)
     Write-Host ('lapses     ' + $s.ends + '   auto-renew is removed on purpose; start a new machine when you need one')
-    # rdp.ps1 starts the bridge if none is listening, pre-answers the unknown-publisher warning and
-    # opens mstsc itself. The password is deliberately not echoed.
-    if ($script:NOGUI) { Write-Host 'mstsc      not opened (no-gui run)'; return }
-    Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $client) -WindowStyle Hidden
+    if ($script:NOGUI) { Write-Host 'browser    not opened (no-gui run)'; return }
+    # ttyd asks for basic auth in the browser; the first answer is remembered by the browser itself,
+    # so a re-open after that is one click.
+    Start-Process $s.url
 }
-if ($Cmd -eq 'rdp') { Invoke-Rdp $null; exit }
+if ($Cmd -eq 'console') { Invoke-Console $null; exit }
 
 if ($Cmd -eq 'status') {
     $raw = GetRaw ($api + '/contents/' + $sessPath)
@@ -240,10 +208,6 @@ if ($Cmd -eq 'stop') {
         Invoke-RestMethod -Uri ($api + '/contents/' + $sessPath) -Method Put -Headers $h -Body ([Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 60 | Out-Null
         Write-Host 'session.json marked dead'
     } catch { Write-Host ('mark dead failed: ' + $_.Exception.Message) }
-    & cmdkey.exe ('/delete:TERMSRV/' + 'rdp.kun9.ccwu.cc:13389') 2>&1 | Out-Null
-    & cmdkey.exe ('/delete:TERMSRV/' + 'rdp.kun9.ccwu.cc') 2>&1 | Out-Null
-    & cmdkey.exe '/delete:termsrv:localhost:13389' 2>&1 | Out-Null
-    Write-Host 'saved RDP credential removed'
     # A computer still running an OLD kit may have the timer armed; stopping must leave nothing behind,
     # otherwise the machine comes back five minutes later and the stop button looks broken.
     if (Get-ScheduledTask -TaskName 'kun9_wt_renew' -EA SilentlyContinue) {
@@ -255,7 +219,7 @@ if ($Cmd -eq 'stop') {
 
 # start
 # one session at a time: two live VMs would both connect the same named tunnel, and cloudflared
-# load-balances connections across connectors, so mstsc could land on the other machine's login.
+# load-balances connections across connectors, so the console could land on the other machine's login.
 foreach ($old in @(RunsOf $wf | Where-Object { $_.status -in @('queued', 'in_progress') })) {
     try {
         Invoke-RestMethod -Uri ($api + '/actions/runs/' + $old.id + '/cancel') -Method Post -Headers $h -TimeoutSec 45 | Out-Null
@@ -329,10 +293,10 @@ if (-not $hit) {
     exit 1
 }
 Show $hit (Unseal $hit.cipher)
-# 3389 without a second command: hand the tunnel token in, wait for the named connector, open mstsc.
-# This runs BEFORE the ttyd probe on purpose -- that probe retries a Cloudflare DNS publish for up to
-# five minutes, and there is no reason for the Remote Desktop window to wait behind it.
-Invoke-Rdp $hit
+# The console opens without a second command: hand the tunnel token in, wait for the named
+# connector, then open the browser. This runs before the ttyd probe on purpose -- that probe
+# retries a Cloudflare DNS publish for up to five minutes and nothing should wait behind it.
+Invoke-Console $hit
 if (-not $script:NOGUI) { Probe $hit (Unseal $hit.cipher) } else { Write-Host 'probe      ttyd probe skipped (no-gui run)' }
 
 # Auto-renew is retired (2026-10-09, user order): a box that re-spawns a Windows runner every 6 h is
