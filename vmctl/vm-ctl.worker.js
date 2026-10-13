@@ -1,18 +1,20 @@
 
 // kun9 VM control panel — one page that turns the GitHub free Windows runner on and off.
 //
-// No GitHub token lives here, and that is the whole trick: the only Actions trigger that needs
-// no credential is `schedule`, so winterm.yml runs a 5-minute watchdog whose first job is to ask
-// this Worker "is a start queued?" (/api/claim). If yes, the Windows job runs; if no, it finishes
-// in a few seconds. Stopping is the mirror image: the panel writes a stop flag here and the live
-// VM reads it on its next heartbeat (/api/power) and ends its own run.
 //
-// So the secrets kept in this Worker are exactly one: PANEL_KEY, the password for the page.
+// Power is credential-free by default: winterm.yml runs a 5-minute watchdog whose first job is to
+// ask this Worker "is a start queued?" (/api/claim). If yes the Windows job runs; if no it finishes
+// in a few seconds. Stopping is the mirror image: the panel writes a stop flag here and the live VM
+// reads it on its next heartbeat (/api/power) and ends its own run. A fine-grained token pasted at
+// /token only replaces the watchdog step with an instant dispatch.
+//
+// The secrets kept in this Worker are PANEL_KEY, the password for the page, and that optional token.
 
 const REPO = 'kunge520/kun9-compute';
 const WF = 'winterm.yml';
 const API = 'https://api.github.com';
 const RAW = 'https://raw.githubusercontent.com/' + REPO + '/main/winterm/session.json';
+const TTYD = 'https://wt.kun9.ccwu.cc';
 const RUNS = '/repos/' + REPO + '/actions/workflows/' + WF + '/runs?per_page=3';
 const COOKIE = 'vmctl';
 
@@ -216,13 +218,25 @@ function fresh(iso, seconds) {
 }
 
 async function session(force) {
-  // raw.githubusercontent caches per URL for about a minute, which is long enough for the panel to
-  // keep showing a machine that shut itself down. The ten-second bucket breaks the cache without
-  // turning every status poll into a fresh miss.
+  // raw.githubusercontent answers with max-age=300, so this file can be minutes behind the machine
+  // it describes. The ten-second bucket only stops the edge caching it a second time -- it cannot
+  // beat the origin cache, which is why status() also asks the terminal itself.
   const url = RAW + '?t=' + Math.floor(Date.now() / 10000);
   return fetch(url, { cf: { cacheTtl: force ? 0 : 10, cache: 'bypass', forceRefresh: !!force } })
     .then((r) => (r.ok ? r.json() : null))
     .catch(() => null);
+}
+
+// The named tunnel's hostname is fixed, so the terminal can be asked directly: a 401 out there
+// means a ttyd is serving right now, which is all 打开终端 needs to be worth clicking. Dead or
+// unconnected, Cloudflare answers 502/530 instead.
+async function originLive() {
+  try {
+    const r = await fetch(TTYD + '/', { redirect: 'manual', cache: 'no-store', cf: { cacheTtl: 0 } });
+    return r.status === 401 || r.status === 200 || r.status === 302;
+  } catch (e) {
+    return false;
+  }
 }
 
 // The run list of a public repo is readable without a token, but an anonymous call from the edge
@@ -274,6 +288,17 @@ async function status(env) {
     };
   }
   out.queue = await read(env, 'power');
+  // While a run is still live, trust the terminal over the five-minute-old heartbeat file: the
+  // machine can be serving for minutes before session.json reaches the panel, and a greyed-out
+  // 打开终端 in that window reads as "ttyd 连不上".
+  if (r && r.live && !(out.vm && out.vm.alive === true) && (await originLive())) {
+    const v = out.vm || {};
+    out.vm = {
+      alive: true, url: TTYD, user: v.user || 'administrator', ends: v.ends || '', check: v.check || '',
+      note: '终端已经起来了，心跳文件还在路上', named: v.named || '', run_id: r.live,
+      restarts: v.restarts || 0, closed: '',
+    };
+  }
   return out;
 }
 
