@@ -74,6 +74,21 @@ function Tail([string]$f, [int]$n) {
   if (Test-Path $f) { return (((Get-Content $f -Tail $n -EA SilentlyContinue) -join ' | ') -replace "`r", '') }
   return ''
 }
+function Rdp-Diag {
+  # Read-only facts about the built-in RDP listener. The browser-RDP path needs a private IP the
+  # connector can dial plus whatever the image already has enabled, so measure before changing keys.
+  try {
+    $l = @(Get-NetTCPConnection -State Listen -LocalPort 3389 -EA SilentlyContinue | ForEach-Object { '' + $_.LocalAddress })
+    $ts = (Get-Service TermService -EA SilentlyContinue).Status
+    $deny = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -EA SilentlyContinue).fDenyTSConnections
+    $ws = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
+    $nla = (Get-ItemProperty -Path $ws -Name UserAuthentication -EA SilentlyContinue).UserAuthentication
+    $sec = (Get-ItemProperty -Path $ws -Name SecurityLayer -EA SilentlyContinue).SecurityLayer
+    $prt = (Get-ItemProperty -Path $ws -Name PortNumber -EA SilentlyContinue).PortNumber
+    $ips = @(Get-NetIPAddress -AddressFamily IPv4 -EA SilentlyContinue | Where-Object { $_.IPAddress -notlike '169.*' -and $_.IPAddress -ne '127.0.0.1' } | ForEach-Object { $_.IPAddress })
+    return ('ts=' + $ts + ' listen3389=' + ($l -join '+') + ' deny=' + $deny + ' nla=' + $nla + ' sec=' + $sec + ' port=' + $prt + ' ips=' + ($ips -join '+'))
+  } catch { return 'diag-failed: ' + $_.Exception.Message }
+}
 function Start-Ttyd {
   # One out/err pair per start. Reusing ttyd.err is what hid the deaths: a wedged instance still
   # holds the file handle, the redirect then fails, and the replacement dies before it can write a
@@ -169,6 +184,7 @@ function Publish($extra) {
     origin_http = "$TTYD_ORIGIN"; restarts = $RESTARTS; cf_procs = $CFN; ttyd_procs = $TTYN
     named_procs = $NPN; named = $NAMED; vm_pub = $VM_PUB; url_quick = $QUICK_URL; inbox_diag = $INBOXDIAG
     boot_diag = $BOOTDIAG
+    rdp_diag = Rdp-Diag
     tail_err = (Tail $TTYD_ERR 3); cf_tail = (Tail (Join-Path $work 'cf.log') 2)
     cfn_tail = ((Tail (Join-Path $work 'cfn.log') 2) + ' || ' + (Tail (Join-Path $work 'cfn.err') 4))
   }
