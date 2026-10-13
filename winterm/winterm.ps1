@@ -167,8 +167,37 @@ function Invoke-Console($preset) {
     Write-Host ('lapses     ' + $s.ends + '   auto-renew is removed on purpose; start a new machine when you need one')
     if ($script:NOGUI) { Write-Host 'browser    not opened (no-gui run)'; return }
     # ttyd asks for basic auth in the browser; the first answer is remembered by the browser itself,
-    # so a re-open after that is one click.
-    Start-Process $s.url
+    # so a re-open after that is one click. No browser on this computer is a real case here -- see
+    # Find-Browser -- so the URL is always printed, and a phone or another box can use it directly.
+    Write-Host ('open       ' + $s.url + '   (' + $lu + ' + the password above)')
+    $br = Find-Browser
+    if ($br) {
+        Write-Host ('browser    ' + (Split-Path $br -Leaf))
+        Start-Process -FilePath $br -ArgumentList $s.url
+    } else {
+        Write-Host 'browser    NONE on this computer: https has no handler, so nothing can be opened here.'
+        Write-Host '           Open the URL above on any other device, or install a browser yourself'
+        Write-Host '           (these scripts only print the command, they never install anything):'
+        Write-Host '             winget install --id Microsoft.Edge --accept-package-agreements'
+    }
+}
+function Find-Browser {
+    # Measured 2026-10-14 on this Windows 26300 box: no Edge, no Chrome, and no https UserChoice --
+    # Start-Process on a URL then "succeeds" and opens nothing at all, which from the outside looks
+    # like the button is broken. So look for a browser by path instead of trusting the association.
+    foreach ($c in @('C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe',
+                     'C:\Program Files\Microsoft\Edge\Application\msedge.exe',
+                     'C:\Program Files\Google\Chrome\Application\chrome.exe',
+                     'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
+                     (Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe'),
+                     (Join-Path $env:LOCALAPPDATA 'Chromium\Chrome.exe'),
+                     'C:\Program Files\Mozilla Firefox\firefox.exe',
+                     'C:\Program Files (x86)\Mozilla Firefox\firefox.exe',
+                     'C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe',
+                     'C:\Program Files\Opera\Opera.exe')) {
+        if (Test-Path $c) { return $c }
+    }
+    return ''
 }
 if ($Cmd -eq 'console') { Invoke-Console $null; exit }
 
