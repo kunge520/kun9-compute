@@ -212,9 +212,21 @@ function Invoke-Rdp($preset) {
         Write-Host ('  ' + $s.ts_ip + ':3389 not answering yet (try ' + $t + '/3)')
     }
     if (-not $ok) {
+        # One timeout, two opposite causes: this box is not on the tailnet, or the VM's node has left
+        # it because the machine ended. tailscale status tells them apart, so name the one that applies
+        # instead of telling everybody to re-login.
+        $peer = (& $ts status 2>&1 | Where-Object { "$_".Contains($s.ts_ip) } | Select-Object -First 1)
         Write-Host ('cannot reach ' + $s.ts_ip + ':3389 from this computer.')
-        Write-Host '  this box: run  & $ts up   (or open the Tailscale tray icon and sign in to the same tailnet)'
-        Write-Host ('  the VM  : ts_diag=' + $s.ts_diag + '  name=' + $s.ts_name)
+        if ("$peer" -match 'offline') {
+            Write-Host ('  that node left the tailnet: ' + "$peer".Trim())
+            Write-Host '  the machine has ended -- double-click 1 (or -Cmd start) for a new one'
+        } elseif (-not $peer) {
+            Write-Host ('  nothing on this tailnet has that address (VM name=' + $s.ts_name + ')')
+            Write-Host '  this box may be logged into a different tailnet: run  & $ts up'
+        } else {
+            Write-Host ('  node is listed but not answering: ' + "$peer".Trim())
+            Write-Host ('  the VM  : ts_diag=' + $s.ts_diag + '  name=' + $s.ts_name)
+        }
         exit 1
     }
 
