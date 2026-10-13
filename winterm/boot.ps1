@@ -42,6 +42,7 @@ $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $work = $PWD.Path
 $ref = $env:GITHUB_REF_NAME
+$CTL = 'https://ctl.kun9.ccwu.cc'
 git config user.name winterm
 git config user.email winterm@users.noreply.github.com
 
@@ -247,6 +248,16 @@ $until = (Get-Date).ToUniversalTime().AddSeconds($SECS)
 $lastPublish = Get-Date
 while ((Get-Date).ToUniversalTime() -lt $until) {
   Start-Sleep -Seconds 20
+
+  # the panel's stop button only sets a flag; we are the ones who read it and leave. Returning
+  # from here ends the run, which is what actually frees the runner.
+  try {
+    if ((Invoke-RestMethod -Uri ($CTL + '/api/power') -TimeoutSec 8).action -eq 'stop') {
+      Invoke-RestMethod -Uri ($CTL + '/api/power/clear') -Method Post -TimeoutSec 8 | Out-Null
+      Write-Host 'panel asked for stop, exiting'
+      break
+    }
+  } catch { Write-Host ('panel poll failed: ' + $_.Exception.Message) }
   $TTYN = (Get-Process ttyd -EA SilentlyContinue | Measure-Object).Count
   $CFN = (Get-Process cf -EA SilentlyContinue | Measure-Object).Count
   $NPN = (Get-Process cfn -EA SilentlyContinue | Measure-Object).Count
