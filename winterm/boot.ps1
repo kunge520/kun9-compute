@@ -26,8 +26,11 @@
 # - a self_hosted Access app with ZERO policies does not gate the hostname (the edge forwards
 # straight to the connector), so the console is guarded only by ttyd's own basic auth.
 # - git identity must be set before ANY commit, including the failure path.
-# - ttyd.win32.exe was observed Dying mid-session (Cloudflare then answers 502 forever), so the
-# wait is a supervising loop that restarts it and republishes, instead of a blind sleep.
+# - a 502 at wt.kun9.ccwu.cc while the run is in_progress is not Cloudflare being moody: it means no
+# ttyd is listening. That happened because the ttyd download went through api.github.com (rate
+# limited on shared runner IPs) and failed quietly, so the exe was never on disk -- hence the size
+# checks on both binaries now, and a supervise loop that restarts a real ttyd instead of a blind
+# sleep for the cases where it does exit mid-session.
 # - a quick tunnel's hostname rotates every time cloudflared re-dials, which is why the console
 # lives on the NAMED tunnel (wt.kun9.ccwu.cc) whenever the token is available. Quick tunnels also
 # carry HTTP only -- measured: a tcp:// quick tunnel registers a hostname and the edge answers the
@@ -186,11 +189,35 @@ function Publish($extra) {
   }
 }
 
-Invoke-WebRequest -Uri 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' -OutFile (Join-Path $work 'cf.exe')
-$rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/tsl0922/ttyd/releases/latest'
-$ttydUrl = ($rel.assets | Where-Object { $_.name -like 'ttyd.win*' } | Select-Object -First 1).browser_download_url
-Invoke-WebRequest -Uri $ttydUrl -OutFile (Join-Path $work 'ttyd.exe')
-Write-Host ('binaries cf=' + (Get-Item (Join-Path $work 'cf.exe')).Length + 'B ttyd=' + (Get-Item (Join-Path $work 'ttyd.exe')).Length + 'B src=' + $ttydUrl)
+# Both binaries come straight off the releases' stable /latest/download/ URLs. Asking the GitHub API
+# which file to take was the bug: an anonymous api.github.com call from a shared runner IP is
+# rate limited often enough to return nothing, the download line then failed quietly, and the
+# machine spent its whole life restarting a ttyd.exe that was never on disk (Start-Process: the
+# system cannot find the file specified -- and Cloudflare answered 502 forever).
+function Get-Binary([string]$url, [string]$out, [int]$minBytes) {
+  for ($i = 1; $i -le 3; $i++) {
+    try { Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -TimeoutSec 180 }
+    catch { Write-Host ('download #' + $i + ' failed: ' + $_.Exception.Message) }
+    if ((Test-Path $out) -and ((Get-Item $out).Length -ge $minBytes)) { return $true }
+    Start-Sleep -Seconds 3
+  }
+  return $false
+}
+$OK_CF = Get-Binary 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' (Join-Path $work 'cf.exe') 10MB
+$OK_TD = Get-Binary 'https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.win32.exe' (Join-Path $work 'ttyd.exe') 1MB
+Write-Host ('binaries cf=' + (Get-Item (Join-Path $work 'cf.exe') -EA SilentlyContinue).Length + 'B ok=' + $OK_CF + ' ttyd=' + (Get-Item (Join-Path $work 'ttyd.exe') -EA SilentlyContinue).Length + 'B ok=' + $OK_TD)
+if (-not ($OK_CF -and $OK_TD)) {
+  # No terminal to serve and no tunnel to serve it through: say so in the record the panel reads
+  # and give the run back instead of restarting a missing file for two hours.
+  $diag = @{ alive = $false; error = 'binary download failed'; note = 'ttyd/cloudflared download failed (cf=' + $OK_CF + ' ttyd=' + $OK_TD + ')'; url = ''; closed = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); run_id = $env:GITHUB_RUN_ID } | ConvertTo-Json -Compress
+  Sync-Head
+  Set-Content -Path (Join-Path $work 'winterm/session.json') -Value $diag -Encoding ascii
+  git add -f winterm/session.json
+  git commit -qm ("winterm no binaries " + (Get-Date).ToUniversalTime().ToString('s') + "Z")
+  git push -q origin HEAD:$ref
+  Write-Host '=== giving up: the console binaries did not download ==='
+  exit 0
+}
 
 # ---- console credentials ----
 # One fixed login for the browser console: WT_RDP_PASS (the name predates this -- the secret is now
@@ -209,14 +236,15 @@ for ($i = 0; $i -lt 10; $i++) {
   if ($TTYD_ORIGIN -ne 0) { break }
 }
 Write-Host ('ttyd origin -> ' + $TTYD_ORIGIN + '  pids=' + ((Get-Process ttyd -EA SilentlyContinue).Id -join ','))
-Write-Host ('ttyd.err tail: ' + (Tail (Join-Path $work 'ttyd.err') 8))
+Write-Host ('ttyd err tail: ' + (Tail $TTYD_ERR 8))
 Start-Cf 'http://127.0.0.1:7681' (Join-Path $work 'cf.log')
 $TTYD_URL = Wait-CfUrl (Join-Path $work 'cf.log') 60
 $QUICK_URL = $TTYD_URL
 if (-not $TTYD_URL) {
   Write-Host '=== no tunnel URL, dumping diagnostics ==='
-  foreach ($f in 'cf.log', 'cf.log.stderr', 'ttyd.err') { Write-Host ('---- ' + $f); Get-Content (Join-Path $work $f) -Tail 25 -EA SilentlyContinue | ForEach-Object { Write-Host $_ } }
-  $diag = @{ alive = $false; error = 'no tunnel url'; origin_http = "$TTYD_ORIGIN"; cf_err = (Tail (Join-Path $work 'cf.log.stderr') 20); ttyd_err = (Tail (Join-Path $work 'ttyd.err') 20); run_id = $env:GITHUB_RUN_ID } | ConvertTo-Json -Compress
+  foreach ($f in 'cf.log', 'cf.log.stderr') { Write-Host ('---- ' + $f); Get-Content (Join-Path $work $f) -Tail 25 -EA SilentlyContinue | ForEach-Object { Write-Host $_ } }
+  Write-Host ('---- ' + $TTYD_ERR); Get-Content $TTYD_ERR -Tail 25 -EA SilentlyContinue | ForEach-Object { Write-Host $_ }
+  $diag = @{ alive = $false; error = 'no tunnel url'; origin_http = "$TTYD_ORIGIN"; cf_err = (Tail (Join-Path $work 'cf.log.stderr') 20); ttyd_err = (Tail $TTYD_ERR 20); run_id = $env:GITHUB_RUN_ID } | ConvertTo-Json -Compress
   Set-Content -Path (Join-Path $work 'winterm-diag.json') -Value $diag -Encoding ascii
   git add -f winterm-diag.json; git commit -qm "winterm diag $((Get-Date).ToUniversalTime().ToString('s'))Z"; git push -q origin HEAD:$ref
   exit 0
