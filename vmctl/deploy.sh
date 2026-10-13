@@ -23,6 +23,9 @@ KEYFILE="$HERE/../密钥-换电脑拷走/console_key.txt"
 [ -f "$KEYFILE" ] || { echo "缺少 $KEYFILE（面板口令）"; exit 1; }
 
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
+# curl.exe is a native Windows binary: it cannot read the /tmp path bash hands it, so every
+# file argument below goes through $WD, the same directory in C:/ form.
+WD=$(cd "$D" && pwd -W)
 umask 077
 SRC="${1:-}"
 if [ -n "$SRC" ]; then
@@ -37,13 +40,13 @@ echo "source=$(wc -c < "$D/vm-ctl.worker.js") bytes"
 TOK=$(sed -n '9p' "$SECRETS" | tr -d '\r\n ')
 ACCT=$(sed -n '5p' "$SECRETS" | tr -d '\r\n ')
 KEY=$(tr -d '\r\n' < "$KEYFILE")
-printf 'header = "Authorization: Bearer %s"\n' "$TOK" > "$D/.cf"
-printf '%s' '{"main_module":"vm-ctl.worker.js","compatibility_date":"'"$CDATE"'","bindings":[{"name":"PANEL_KEY","type":"secret_text","text":"'"$KEY"'"},{"name":"STORE","type":"kv_namespace","namespace_id":"'"$KV"'"}]}' > "$D/metadata.json"
+printf 'header = "Authorization: Bearer %s"\n' "$TOK" > "$WD/.cf"
+printf '%s' '{"main_module":"vm-ctl.worker.js","compatibility_date":"'"$CDATE"'","bindings":[{"name":"PANEL_KEY","type":"secret_text","text":"'"$KEY"'"},{"name":"STORE","type":"kv_namespace","namespace_id":"'"$KV"'"}]}' > "$WD/metadata.json"
 
-code=$(curl -sS -m 120 --config "$D/.cf" -o "$D/out.json" -w '%{http_code}' -X PUT \
+code=$(curl -sS -m 120 --config "$WD/.cf" -o "$WD/out.json" -w '%{http_code}' -X PUT \
   "https://api.cloudflare.com/client/v4/accounts/$ACCT/workers/scripts/$WORKER" \
-  --form "metadata=@$D/metadata.json;type=application/json;filename=" \
-  --form "vm-ctl.worker.js=@$D/vm-ctl.worker.js;type=application/javascript+module;filename=vm-ctl.worker.js")
+  --form "metadata=@$WD/metadata.json;type=application/json;filename=" \
+  --form "vm-ctl.worker.js=@$WD/vm-ctl.worker.js;type=application/javascript+module;filename=vm-ctl.worker.js")
 echo "deploy=$code"
-grep -o '"success":[a-z]*\|"message":"[^"]*"' "$D/out.json" | head -4
+grep -o '"success":[a-z]*\|"message":"[^"]*"' "$WD/out.json" | head -4
 curl -sS -m 30 -o /dev/null -w 'page=%{http_code}\n' https://ctl.kun9.ccwu.cc/
