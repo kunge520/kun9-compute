@@ -224,7 +224,10 @@ else {
     )
     foreach ($i in $items) {
         $p = Join-Path $Dir $i.n
-        Set-Content -Path $p -Value @('@echo off', 'call "%~dp0_run.cmd" ' + $i.a) -Encoding ascii
+        # the inner parentheses matter: without them ',' binds looser than '+' and the argument lands on
+        # a second line, so the button would run _run.cmd with NO -Cmd (which means start = a new VM)
+        # and then try to execute '-Cmd rdp' as a command.
+        Set-Content -Path $p -Value @('@echo off', ('call "%~dp0_run.cmd" ' + $i.a)) -Encoding ascii
         Write-Host ('cmd    ' + $i.n)
         # the old absolute-path shortcut for this button, if a previous kit left one here
         $old = [IO.Path]::ChangeExtension($p, '.lnk')
