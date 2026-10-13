@@ -1,6 +1,6 @@
 name: winterm
 
-# Windows browser terminal + Remote Desktop inside a free GitHub-hosted VM (public repo = the
+# Windows browser console inside a free GitHub-hosted VM (public repo = the
 # runners cost no minutes). Every real step of the design, including the hard-won rules, lives in
 # winterm/boot.ps1 -- a workflow step may not be longer than GitHub's 21000-character expression
 # limit, and the script blew straight past it (the run then fails before any job exists, the
@@ -8,9 +8,10 @@ name: winterm
 # "failed to parse workflow: Exceeded max expression length 21000"). So keep this file thin and
 # put logic in the repo.
 #
-# The named-tunnel token and the login the user asked to keep fixed are repository Actions secrets
-# (WT_TUNNEL_TOKEN, WT_RDP_PASS), so a fresh VM configures itself at boot: nothing has to be handed
-# in from another machine first, and a start triggered by anyone -- including a schedule -- works.
+# The named-tunnel token and the fixed console login are repository Actions secrets
+# (WT_TUNNEL_TOKEN, WT_RDP_PASS -- the second name predates the change, it is the ttyd password now),
+# so a fresh VM is reachable in the browser the moment it boots: nothing has to be handed in from
+# another machine first, and a start triggered by anyone -- including a schedule -- works.
 
 on:
   push:
