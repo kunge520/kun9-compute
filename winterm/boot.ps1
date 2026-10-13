@@ -310,6 +310,13 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
       Write-Host 'panel asked for stop, exiting'
       break
     }
+    if ($ask -and $ask.action -eq 'ttyd') {
+      # Drill for the branch below: drop the terminal on purpose so the restart path runs on a real
+      # machine instead of only in theory. The supervisor picks it up on the same pass.
+      Invoke-RestMethod -Uri ($CTL + '/api/power/clear') -Method Post -TimeoutSec 8 | Out-Null
+      Write-Host 'panel asked to restart the terminal, killing ttyd'
+      Get-Process ttyd -EA SilentlyContinue | Stop-Process -Force
+    }
   } catch { }
   $TTYN = (Get-Process ttyd -EA SilentlyContinue | Measure-Object).Count
   $CFN = (Get-Process cf -EA SilentlyContinue | Measure-Object).Count
