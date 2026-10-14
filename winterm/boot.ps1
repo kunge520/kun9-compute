@@ -167,7 +167,6 @@ function Set-Account([string]$nm, [string]$pw) {
   }
   & net localgroup administrators $nm /add 2>&1 | Out-Null
   & net user $nm /active:yes 2>&1 | Out-Null
-  & wmic useraccount where "name='$nm'" set PasswordExpires=false 2>&1 | Out-Null
   $log += ('auth=' + (Test-Logon $nm $pw))
   return ($log -join ' ')
 }
