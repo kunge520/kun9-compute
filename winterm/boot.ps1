@@ -1,6 +1,7 @@
-# Windows VM boot script: browser console (ttyd) only, self-configuring from repo secrets.
-# 2026-10-14: the remote-desktop half is gone -- no 3389 listener, no fleet account, no portproxy,
-# and nothing on the local box forwards 13389 any more. One URL, one login, in the browser.
+# Windows VM boot script: browser console (ttyd) + the built-in RDP listener for Cloudflare's
+# browser-rendered desktop, self-configuring from repo secrets.
+# 2026-10-14: the console is ttyd for now; RDP is enabled at boot because the Access app can only
+# dial a private IP the named tunnel routes to, and the runner image ships the listener with NLA on.
 # Kept out of the workflow YAML on purpose: GitHub refuses to parse a step whose run block is
 # over the 21000-character expression limit (measured: Exceeded max expression length 21000),
 # which kills the run before any job exists and names the workflow only by its path.
@@ -88,6 +89,27 @@ function Rdp-Diag {
     $ips = @(Get-NetIPAddress -AddressFamily IPv4 -EA SilentlyContinue | Where-Object { $_.IPAddress -notlike '169.*' -and $_.IPAddress -ne '127.0.0.1' } | ForEach-Object { $_.IPAddress })
     return ('ts=' + $ts + ' listen3389=' + ($l -join '+') + ' deny=' + $deny + ' nla=' + $nla + ' sec=' + $sec + ' port=' + $prt + ' ips=' + ($ips -join '+'))
   } catch { return 'diag-failed: ' + $_.Exception.Message }
+}
+function Enable-Rdp {
+  # Two things stand between the runner image and Cloudflare's browser desktop. NLA (CredSSP) is on
+  # by default and their client does not speak it, so the negotiation dies before a login prompt
+  # ever appears. And the credential form in the browser is the ONLY prompt there is, so the account
+  # behind it needs a password this script knows: the built-in administrator, pinned to WT_RDP_PASS.
+  # Idempotent, so it runs at every boot and nothing has to be clicked for a fresh machine.
+  $out = @()
+  try {
+    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -Force
+    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0 -Force
+    if ($FIXED) {
+      & net user administrator $FIXED | Out-Null
+      & net user administrator /active:yes | Out-Null
+      $out += ('pw=' + $FIXED.Length)
+    } else { $out += 'pw=none' }
+    Restart-Service TermService -Force -EA SilentlyContinue
+    Start-Sleep -Seconds 4
+    $out += (Rdp-Diag)
+  } catch { $out += 'rdp-failed: ' + $_.Exception.Message }
+  return ($out -join ' ')
 }
 function Start-Ttyd {
   # One out/err pair per start. Reusing ttyd.err is what hid the deaths: a wedged instance still
@@ -242,6 +264,9 @@ $FIXED = "$env:WT_RDP_PASS".Trim()
 $PASS = if ($FIXED) { $FIXED } else { New-Pass }
 $OPENED = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 $ENDS = (Get-Date).ToUniversalTime().AddSeconds($SECS).ToString('yyyy-MM-ddTHH:mm:ssZ')
+
+# ---- desktop: make the built-in listener usable by the Access RDP app before anything else ----
+Write-Host ('rdp at boot: ' + (Enable-Rdp))
 
 # ---- browser terminal over an HTTP quick tunnel: works with no setup at all ----
 Start-Ttyd
