@@ -97,18 +97,20 @@ function VnetIp {
   } catch { }
   return ''
 }
-function Test-Logon([string]$nm, [string]$pw) {
+function Test-Logon([string]$nm, [string]$pw, [int]$type = 2) {
   # The browser can only say "the server rejected your username or password", which cannot tell a
   # wrong password from an account set that silently failed. Ask Windows directly with the same
   # credential the form sends, so the heartbeat names the real reason (1326 bad password, 1327 no
-  # password allowed over the network, 1331 disabled, 1909 locked).
+  # password allowed over the network, 1331 disabled, 1909 locked). Type 2 is an interactive logon
+  # (what the RDP form exercises); type 3 is a network logon, which is what sshd's password auth
+  # goes through -- so the SSH account is checked with 3 before the browser is ever trusted to it.
   try {
     Add-Type -Namespace WM -Name Logon -EA SilentlyContinue -MemberDefinition @'
 [DllImport("advapi32.dll",SetLastError=true,CharSet=CharSet.Unicode)] public static extern bool LogonUser(string u,string d,string p,int t,int pr,out System.IntPtr tok);
 [DllImport("kernel32.dll",SetLastError=true)] public static extern bool CloseHandle(System.IntPtr h);
 '@
     $tok = [IntPtr]::Zero
-    if ([WM.Logon]::LogonUser($nm, '.', $pw, 2, 0, [ref]$tok)) {
+    if ([WM.Logon]::LogonUser($nm, '.', $pw, $type, 0, [ref]$tok)) {
       [void][WM.Logon]::CloseHandle($tok)
       return 'ok'
     }
@@ -208,7 +210,7 @@ function Enable-Ssh {
     }
     Set-Service -Name sshd -StartupType Automatic -EA SilentlyContinue
     Start-Service sshd -EA SilentlyContinue
-    if ($FIXED) { $out += ('acct=' + (Set-Account $SSHUSER $FIXED)) } else { $out += 'pw=none' }
+    if ($FIXED) { $out += ('acct=' + (Set-Account $SSHUSER $FIXED)); $out += ('nlog=' + (Test-Logon $SSHUSER $FIXED 3)) } else { $out += 'pw=none' }
     New-NetFirewallRule -Name winterm-ssh -DisplayName 'winterm browser SSH' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 22 -Profile Any -EA SilentlyContinue | Out-Null
     New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -Value 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -PropertyType String -Force -EA SilentlyContinue | Out-Null
     $out += ('sshd=' + (Get-Service sshd -EA SilentlyContinue).Status)
