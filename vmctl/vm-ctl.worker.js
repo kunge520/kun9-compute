@@ -23,11 +23,13 @@ const RDP_APP = 'https://rdp.kun9.ccwu.cc';
 // Clientless SSH is served from the tunnel ingress route ssh.kun9.ccwu.cc -> ssh://127.0.0.1:22, so its
 // link is fixed: the origin address is resolved by the connector, never carried in the URL.
 const SSH_APP = 'https://ssh.kun9.ccwu.cc';
-// Access dials the IP that appears in the URL, and the VM's address inside the tunnel's virtual
-// network is handed out fresh every boot, so the desktop link follows the heartbeat's rdp_ip. This
-// one is only the fallback for a panel that has never seen a machine.
+// Access authorises the desktop link by matching the IP in the URL against the app's target_criteria,
+// which only lists the two registered infrastructure targets. vm-local.rdp.kun9.ccwu.cc -> 127.0.0.1 is
+// fixed, and the connector runs ON the VM, so dialing loopback always reaches that VM's own 3389. The
+// VM's tunnel-side IP (heartbeat rdp_ip) changes every boot and is NOT a registered target, so we do
+// not use it -- that made Access reject the target before IronRDP rendered.
 const RDP_VNET = '0906b491-71ec-42d1-93b5-aa9048aa2529';
-const RDP_IP0 = '10.1.0.251';
+const RDP_TARGET = '127.0.0.1';
 const IDP_HOST = 'ctl.kun9.ccwu.cc';
 const IDP_CID = 'vmctl-panel';
 const IDP_EMAIL = '645478520@qq.com';
@@ -643,9 +645,8 @@ function app() {
     "$('bstart').onclick=async function(){say('正在排队开机…');var x=await post('/api/queue',{action:'start'});say(x.j.note||(x.j.ok?'已排队':'开机失败：'+x.code));setTimeout(tick,1500)};",
     "$('bstop').onclick=async function(){if(!confirm('确定关机？这台机器上的未保存内容会丢。'))return;say('正在下发关机…');var x=await post('/api/queue',{action:'stop'});say(x.j.note||(x.j.ok?'已下发':'关机失败：'+x.code));setTimeout(tick,1500)};",
     "var SSHBASE='" + SSH_APP + "';",
-    "var RDPBASE='" + RDP_APP + '/rdp/' + RDP_VNET + "/';",
-    "var RDPFALL='" + RDP_IP0 + "';",
-    "$('brdp').onclick=function(){window.open(RDPBASE+((v&&v.rdp_ip)||RDPFALL)+'/3389','_blank')};",
+    "var RDPURL='" + RDP_APP + '/rdp/' + RDP_VNET + '/' + RDP_TARGET + "/3389';",
+    "$('brdp').onclick=function(){window.open(RDPURL,'_blank')};",
     "setInterval(function(){",
     " if(!waiting)return;",
     " var s=wait0?Math.max(0,Math.round((Date.now()-wait0)/1000)):0;",
