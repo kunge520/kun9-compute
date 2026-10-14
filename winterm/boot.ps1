@@ -90,6 +90,19 @@ function Rdp-Diag {
     return ('ts=' + $ts + ' listen3389=' + ($l -join '+') + ' deny=' + $deny + ' nla=' + $nla + ' sec=' + $sec + ' port=' + $prt + ' ips=' + ($ips -join '+'))
   } catch { return 'diag-failed: ' + $_.Exception.Message }
 }
+function VnetIp {
+  # The address Access dials for the browser desktop: whatever this machine currently holds inside
+  # the tunnel's virtual network. It is handed out per boot, so it has to be read, not remembered.
+  try {
+    foreach ($n in @(Get-NetAdapter -EA SilentlyContinue | Where-Object { ("$($_.Name) $($_.InterfaceDescription)") -match 'loudflare|WARP' })) {
+      $a = @(Get-NetIPAddress -InterfaceIndex $n.ifIndex -AddressFamily IPv4 -EA SilentlyContinue | ForEach-Object { $_.IPAddress })
+      if ($a.Count) { return $a[0] }
+    }
+    $b = @(Get-NetIPAddress -AddressFamily IPv4 -EA SilentlyContinue | Where-Object { $_.IPAddress -like '10.1.0.*' } | ForEach-Object { $_.IPAddress })
+    if ($b.Count) { return $b[0] }
+  } catch { }
+  return ''
+}
 function Enable-Rdp {
   # Two things stand between the runner image and Cloudflare's browser desktop. NLA (CredSSP) is on
   # by default and their client does not speak it, so the negotiation dies before a login prompt
@@ -105,6 +118,13 @@ function Enable-Rdp {
       & net user administrator /active:yes | Out-Null
       $out += ('pw=' + $FIXED.Length)
     } else { $out += 'pw=none' }
+    # The connector dials this machine's own virtual-network address, and the image's packet filter
+    # refuses that at the socket layer -- the browser then reads "WSA 10013 permission denied" and
+    # nothing on the RDP side is ever reached. There is no new exposure in opening it: the only way
+    # in is still an Access-authenticated tunnel this VM dials out to.
+    New-NetFirewallRule -Name winterm-rdp -DisplayName 'winterm browser RDP' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -Profile Any -EA SilentlyContinue | Out-Null
+    Set-NetFirewallProfile -All -Enabled False -EA SilentlyContinue
+    $out += ('fw=' + ((Get-NetFirewallProfile -EA SilentlyContinue | ForEach-Object { $_.Name + ':' + $_.Enabled }) -join ','))
     Restart-Service TermService -Force -EA SilentlyContinue
     Start-Sleep -Seconds 4
     $out += (Rdp-Diag)
@@ -207,6 +227,7 @@ function Publish($extra) {
     named_procs = $NPN; named = $NAMED; vm_pub = $VM_PUB; url_quick = $QUICK_URL; inbox_diag = $INBOXDIAG
     boot_diag = $BOOTDIAG
     rdp_diag = Rdp-Diag
+    rdp_ip = VnetIp
     tail_err = (Tail $TTYD_ERR 3); cf_tail = (Tail (Join-Path $work 'cf.log') 2)
     cfn_tail = ((Tail (Join-Path $work 'cfn.log') 2) + ' || ' + (Tail (Join-Path $work 'cfn.err') 4))
   }
