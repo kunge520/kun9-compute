@@ -174,26 +174,33 @@ function Enable-Rdp {
     Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -Force
     Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0 -Force
     if ($FIXED) {
-      & net user administrator $FIXED 2>&1 | Out-Null
+      $msg = ((& net user administrator $FIXED 2>&1) -join ' ')
       $set = $LASTEXITCODE
+      $complex = ''
       if ($set -ne 0) {
-        # A short generated password can be refused by the image's complexity policy, and a refused
-        # set leaves the account with NO password at all -- which the browser reports as a plain
-        # "rejected your username or password". Relax the two local policies that can block it,
-        # then retry, and let the self-test below say which one actually took.
+        # The pinned credential is short and numeric, so the image's complexity policy refuses it --
+        # and a refused set leaves the account with NO usable password, which the browser reports as
+        # a plain "rejected your username or password". Relax the local policy and retry; keep the
+        # failure text (never the password) so the heartbeat names the real reason.
         & net accounts /minpwlen:0 2>&1 | Out-Null
-        $cfg = Join-Path $env:TEMP 'sec-wm.inf'
-        $sdb = Join-Path $env:TEMP 'sec-wm.sdb'
+        $cfg = 'C:\sec-wm.inf'
+        $sdb = 'C:\sec-wm.sdb'
         & secedit /export /cfg $cfg /areas SECURITYPOLICY 2>&1 | Out-Null
         if (Test-Path $cfg) {
-          (Get-Content $cfg) -replace 'PasswordComplexity\s*=\s*1', 'PasswordComplexity = 0' | Set-Content -Path $cfg -Encoding Unicode
+          $inf = Get-Content $cfg
+          $inf = $inf -replace 'PasswordComplexity\s*=\s*1', 'PasswordComplexity = 0'
+          $inf = $inf -replace 'MinimumPasswordLength\s*=\s*\d+', 'MinimumPasswordLength = 0'
+          $inf | Set-Content -Path $cfg -Encoding Unicode
           & secedit /configure /db $sdb /cfg $cfg /areas SECURITYPOLICY 2>&1 | Out-Null
-          & net user administrator $FIXED 2>&1 | Out-Null
-          $set = $LASTEXITCODE
+          $complex = (($inf | Where-Object { $_ -match 'PasswordComplexity' }) -join ';')
         }
+        $msg = $msg + ' | after: ' + (((& net user administrator $FIXED 2>&1) -join ' '))
+        $set = $LASTEXITCODE
       }
       & net user administrator /active:yes 2>&1 | Out-Null
-      $out += ('setpw=' + $set + ' len=' + $FIXED.Length + ' auth=' + (Test-Logon $FIXED))
+      $msg = $msg -replace [regex]::Escape($FIXED), '<pw>'
+      if ($msg.Length -gt 170) { $msg = $msg.Substring(0, 170) }
+      $out += ('setpw=' + $set + ' ' + $complex + ' msg=' + $msg + ' len=' + $FIXED.Length + ' auth=' + (Test-Logon $FIXED))
     } else { $out += 'pw=none' }
     # The connector dials this machine's own virtual-network address, and the image's packet filter
     # refuses that at the socket layer -- the browser then reads "WSA 10013 permission denied" and
