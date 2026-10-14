@@ -173,18 +173,21 @@ function Set-Account([string]$nm, [string]$pw) {
   return ($log -join ' ')
 }
 function Enable-Rdp {
-  # Cloudflare's browser desktop is IronRDP, which authenticates through NLA/CredSSP: the credential
-  # form in the browser is not an in-session logon UI, it feeds a CredSSP handshake that happens
-  # BEFORE a session is built. So the server must REQUIRE NLA (UserAuthentication=1) or the browser
-  # sits at "Connecting as local account ..." forever -- the collected password has no CredSSP channel
-  # to travel on. (The old assumption that IronRDP "does not speak NLA" was backwards; NLA-off is what
-  # broke it.) The one credential form means the account behind it needs a password this script knows,
-  # pinned to WT_RDP_PASS. Idempotent, runs every boot, nothing to click for a fresh machine.
+  # Cloudflare's browser desktop is IronRDP, and the two listener keys have to match what it speaks.
+  # - UserAuthentication=1: the credential form feeds a CredSSP handshake that runs BEFORE a session
+  #   exists, so NLA must be required or the collected password has nowhere to go. (The old
+  #   assumption that IronRDP "does not speak NLA" was backwards; NLA-off is what broke it.)
+  # - SecurityLayer=0 (Negotiate): Cloudflare's own prerequisites say the security layer must be
+  #   Negotiate or SSL, never 2. Value 2 pins the post-CredSSP channel to native RDP (RC4)
+  #   encryption, which IronRDP never completes -- the browser reaches "Connecting as local account"
+  #   (so the WebSocket opened and the connector dialled fine) and then hangs there forever.
+  # The one credential form means the account behind it needs a password this script knows, pinned to
+  # WT_RDP_PASS. Idempotent, runs every boot, nothing to click for a fresh machine.
   $out = @()
   try {
     Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -Force
     Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1 -Force
-    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name SecurityLayer -Value 2 -Force
+    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name SecurityLayer -Value 0 -Force
     if ($FIXED) { $out += (Set-Account 'administrator' $FIXED) } else { $out += 'pw=none' }
     # The image's packet filter is irrelevant once the only way in is an Access-authenticated tunnel
     # this VM dials out to, and leaving it on is what made the connector's own dial fail.
