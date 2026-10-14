@@ -125,6 +125,24 @@ function VnetIp {
   } catch { }
   return ''
 }
+function Test-Logon([string]$pw) {
+  # The browser can only say "the server rejected your username or password", which cannot tell a
+  # wrong password from an account set that silently failed. Ask Windows directly with the same
+  # credential the form sends, so the heartbeat names the real reason (1326 bad password, 1327 no
+  # password allowed over the network, 1331 disabled, 1909 locked).
+  try {
+    Add-Type -Namespace WM -Name Logon -EA SilentlyContinue -MemberDefinition @'
+[DllImport("advapi32.dll",SetLastError=true,CharSet=CharSet.Unicode)] public static extern bool LogonUser(string u,string d,string p,int t,int pr,out System.IntPtr tok);
+[DllImport("kernel32.dll",SetLastError=true)] public static extern bool CloseHandle(System.IntPtr h);
+'@
+    $tok = [IntPtr]::Zero
+    if ([WM.Logon]::LogonUser('administrator', '.', $pw, 2, 0, [ref]$tok)) {
+      [void][WM.Logon]::CloseHandle($tok)
+      return 'ok'
+    }
+    return 'err=' + [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+  } catch { return 'ex=' + $_.Exception.Message }
+}
 function Add-RdpAlias {
   # The desktop has to answer on an address the connector can actually dial. Dialing this machine's
   # own tunnel address (the 10.1.0.x the wintun adapter holds) is refused at the socket layer --
@@ -156,9 +174,26 @@ function Enable-Rdp {
     Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -Force
     Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0 -Force
     if ($FIXED) {
-      & net user administrator $FIXED | Out-Null
-      & net user administrator /active:yes | Out-Null
-      $out += ('pw=' + $FIXED.Length)
+      & net user administrator $FIXED 2>&1 | Out-Null
+      $set = $LASTEXITCODE
+      if ($set -ne 0) {
+        # A short generated password can be refused by the image's complexity policy, and a refused
+        # set leaves the account with NO password at all -- which the browser reports as a plain
+        # "rejected your username or password". Relax the two local policies that can block it,
+        # then retry, and let the self-test below say which one actually took.
+        & net accounts /minpwlen:0 2>&1 | Out-Null
+        $cfg = Join-Path $env:TEMP 'sec-wm.inf'
+        $sdb = Join-Path $env:TEMP 'sec-wm.sdb'
+        & secedit /export /cfg $cfg /areas SECURITYPOLICY 2>&1 | Out-Null
+        if (Test-Path $cfg) {
+          (Get-Content $cfg) -replace 'PasswordComplexity\s*=\s*1', 'PasswordComplexity = 0' | Set-Content -Path $cfg -Encoding Unicode
+          & secedit /configure /db $sdb /cfg $cfg /areas SECURITYPOLICY 2>&1 | Out-Null
+          & net user administrator $FIXED 2>&1 | Out-Null
+          $set = $LASTEXITCODE
+        }
+      }
+      & net user administrator /active:yes 2>&1 | Out-Null
+      $out += ('setpw=' + $set + ' len=' + $FIXED.Length + ' auth=' + (Test-Logon $FIXED))
     } else { $out += 'pw=none' }
     # The connector dials this machine's own virtual-network address, and the image's packet filter
     # refuses that at the socket layer -- the browser then reads "WSA 10013 permission denied" and
