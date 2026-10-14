@@ -87,8 +87,30 @@ function Rdp-Diag {
     $sec = (Get-ItemProperty -Path $ws -Name SecurityLayer -EA SilentlyContinue).SecurityLayer
     $prt = (Get-ItemProperty -Path $ws -Name PortNumber -EA SilentlyContinue).PortNumber
     $ips = @(Get-NetIPAddress -AddressFamily IPv4 -EA SilentlyContinue | Where-Object { $_.IPAddress -notlike '169.*' -and $_.IPAddress -ne '127.0.0.1' } | ForEach-Object { $_.IPAddress })
-    return ('ts=' + $ts + ' listen3389=' + ($l -join '+') + ' deny=' + $deny + ' nla=' + $nla + ' sec=' + $sec + ' port=' + $prt + ' ips=' + ($ips -join '+'))
+    # Which adapter owns the tunnel address tells the connector's dial apart from a plain local one:
+    # a wintun/WARP adapter does not hairpin, and that is the refusal the browser reports.
+    $vni = @(Get-NetIPAddress -AddressFamily IPv4 -EA SilentlyContinue | Where-Object { $_.IPAddress -like '10.1.0.*' } | ForEach-Object { $_.InterfaceAlias + '=' + $_.IPAddress })
+    # Hyper-V/WinNAT reserve TCP ports on these images, and a connect() whose source port lands in an
+    # excluded range fails with the very WSAEACCES the browser shows, firewall aside.
+    $ex = ((netsh int ipv4 show excludedportrange protocol=tcp 2>$null | Select-String -Pattern '^\s*\d+\s+\d+\s*$') | ForEach-Object { ($_ -replace '\s+', '-').Trim('-') }) -join ','
+    return ('ts=' + $ts + ' listen3389=' + ($l -join '+') + ' deny=' + $deny + ' nla=' + $nla + ' sec=' + $sec + ' port=' + $prt + ' ips=' + ($ips -join '+') + ' vnetdev=' + ($vni -join '+') + ' excl=' + $ex)
   } catch { return 'diag-failed: ' + $_.Exception.Message }
+}
+function Probe-Port([string]$ip, [int]$port) {
+  # Reproduces the connector's own connect() so the heartbeat says whether the refusal is
+  # this host's socket layer or something cloudflared does differently.
+  if (-not $ip) { return 'skip' }
+  try {
+    $c = New-Object Net.Sockets.TcpClient
+    $iar = $c.BeginConnect($ip, $port, $null, $null)
+    if (-not $iar.AsyncWaitHandle.WaitOne(4000)) { $c.Close(); return 'timeout' }
+    $c.EndConnect($iar); $c.Close()
+    return 'ok'
+  } catch {
+    $e = $_.Exception
+    if ($e.InnerException) { $e = $e.InnerException }
+    return 'err:' + $e.SocketErrorCode
+  }
 }
 function VnetIp {
   # The address Access dials for the browser desktop: whatever this machine currently holds inside
@@ -102,6 +124,26 @@ function VnetIp {
     if ($b.Count) { return $b[0] }
   } catch { }
   return ''
+}
+function Add-RdpAlias {
+  # The desktop has to answer on an address the connector can actually dial. Dialing this machine's
+  # own tunnel address (the 10.1.0.x the wintun adapter holds) is refused at the socket layer --
+  # wintun does not hairpin -- and the browser shows that as "WSA 10013 permission denied". An
+  # address on the loopback adapter is delivered by the local stack instead, so the dial never
+  # enters the tunnel. It is fixed rather than per-boot, so the Access target stops going stale.
+  $alias = '10.1.0.9'
+  try {
+    if (-not @(Get-NetIPAddress -IPAddress $alias -AddressFamily IPv4 -EA SilentlyContinue).Count) {
+      $lo = (Get-NetIPAddress -IPAddress '127.0.0.1' -AddressFamily IPv4 -EA SilentlyContinue).InterfaceIndex
+      if ($lo) { New-NetIPAddress -InterfaceIndex $lo -IPAddress $alias -PrefixLength 32 -EA SilentlyContinue | Out-Null }
+      if (-not @(Get-NetIPAddress -IPAddress $alias -AddressFamily IPv4 -EA SilentlyContinue).Count) {
+        & netsh interface ipv4 add address 'Loopback Pseudo-Interface 1' $alias 255.255.255.255 2>&1 | Out-Null
+      }
+    }
+    $ok = @(Get-NetIPAddress -IPAddress $alias -AddressFamily IPv4 -EA SilentlyContinue).Count
+    $script:RDPIP = if ($ok) { $alias } else { VnetIp }
+    return ('alias=' + $alias + $(if ($ok) { 'set' } else { 'FAILED' }) + ' dial=' + (Probe-Port $alias 3389))
+  } catch { $script:RDPIP = VnetIp; return 'alias-failed: ' + $_.Exception.Message }
 }
 function Enable-Rdp {
   # Two things stand between the runner image and Cloudflare's browser desktop. NLA (CredSSP) is on
@@ -128,8 +170,12 @@ function Enable-Rdp {
     Restart-Service TermService -Force -EA SilentlyContinue
     Start-Sleep -Seconds 4
     $out += (Rdp-Diag)
+    $out += (Add-RdpAlias)
+    $sv = VnetIp
+    $out += ('dial_vnet=' + (Probe-Port $sv 3389) + ' dial_lo=' + (Probe-Port '127.0.0.1' 3389))
   } catch { $out += 'rdp-failed: ' + $_.Exception.Message }
-  return ($out -join ' ')
+  $script:RDPINFO = $out -join ' '
+  return $script:RDPINFO
 }
 function Start-Ttyd {
   # One out/err pair per start. Reusing ttyd.err is what hid the deaths: a wedged instance still
@@ -227,7 +273,8 @@ function Publish($extra) {
     named_procs = $NPN; named = $NAMED; vm_pub = $VM_PUB; url_quick = $QUICK_URL; inbox_diag = $INBOXDIAG
     boot_diag = $BOOTDIAG
     rdp_diag = Rdp-Diag
-    rdp_ip = VnetIp
+    rdp_info = $script:RDPINFO
+    rdp_ip = $(if ($script:RDPIP) { $script:RDPIP } else { VnetIp })
     tail_err = (Tail $TTYD_ERR 3); cf_tail = (Tail (Join-Path $work 'cf.log') 2)
     cfn_tail = ((Tail (Join-Path $work 'cfn.log') 2) + ' || ' + (Tail (Join-Path $work 'cfn.err') 4))
   }
@@ -378,6 +425,14 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
       Invoke-RestMethod -Uri ($CTL + '/api/power/clear') -Method Post -TimeoutSec 8 | Out-Null
       Write-Host 'panel asked to restart the terminal, killing ttyd'
       Get-Process ttyd -EA SilentlyContinue | Stop-Process -Force
+    }
+    if ($ask -and $ask.action -eq 'rdp') {
+      # Desktop repair without a reboot (the poll resets $changed right after, so publish on the spot):
+      # the panel asks a live machine to redo the listener setup and to report what it can reach.
+      Invoke-RestMethod -Uri ($CTL + '/api/power/clear') -Method Post -TimeoutSec 8 | Out-Null
+      $r = Enable-Rdp
+      Write-Host ('panel asked to refresh the desktop: ' + $r)
+      Publish @{ note = 'rdp: ' + $r }
     }
   } catch { }
   $TTYN = (Get-Process ttyd -EA SilentlyContinue | Measure-Object).Count
