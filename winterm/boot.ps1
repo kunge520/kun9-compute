@@ -145,57 +145,59 @@ function Test-Logon([string]$pw) {
 }
 function Add-RdpAlias {
   # The desktop has to answer on an address the connector can actually dial. Dialing this machine's
-  # own tunnel address (the 10.1.0.x the wintun adapter holds) is refused at the socket layer --
-  # wintun does not hairpin -- and the browser shows that as "WSA 10013 permission denied". An
-  # address on the loopback adapter is delivered by the local stack instead, so the dial never
-  # enters the tunnel. It is fixed rather than per-boot, so the Access target stops going stale.
+  # own tunnel address (the 10.1.0.x the cloudflared adapter holds, measured as "Ethernet 3") is
+  # refused at the socket layer -- that adapter does not hairpin -- and the browser shows that as
+  # "WSA 10013 permission denied". An address on the loopback adapter is delivered by the local
+  # stack instead, so the dial never enters the tunnel. Fixed, not per-boot, so the Access target
+  # stops going stale.
   $alias = '10.1.0.9'
   try {
-    if (-not @(Get-NetIPAddress -IPAddress $alias -AddressFamily IPv4 -EA SilentlyContinue).Count) {
+    $have = @(Get-NetIPAddress -IPAddress $alias -AddressFamily IPv4 -EA SilentlyContinue).Count
+    if (-not $have) {
       $lo = (Get-NetIPAddress -IPAddress '127.0.0.1' -AddressFamily IPv4 -EA SilentlyContinue).InterfaceIndex
       if ($lo) { New-NetIPAddress -InterfaceIndex $lo -IPAddress $alias -PrefixLength 32 -EA SilentlyContinue | Out-Null }
-      if (-not @(Get-NetIPAddress -IPAddress $alias -AddressFamily IPv4 -EA SilentlyContinue).Count) {
-        & netsh interface ipv4 add address 'Loopback Pseudo-Interface 1' $alias 255.255.255.255 2>&1 | Out-Null
-      }
     }
-    $ok = @(Get-NetIPAddress -IPAddress $alias -AddressFamily IPv4 -EA SilentlyContinue).Count
-    $script:RDPIP = if ($ok) { $alias } else { VnetIp }
-    return ('alias=' + $alias + $(if ($ok) { 'set' } else { 'FAILED' }) + ' dial=' + (Probe-Port $alias 3389))
+    if (-not @(Get-NetIPAddress -IPAddress $alias -AddressFamily IPv4 -EA SilentlyContinue).Count) {
+      & netsh interface ipv4 add address 'Loopback Pseudo-Interface 1' $alias 255.255.255.255 2>&1 | Out-Null
+    }
+    # Dialing is the check that matters: the WMI-only existence test can flake on a boot where the
+    # CIM providers are still settling, while the socket is what the connector actually uses.
+    $d = Probe-Port $alias 3389
+    $script:RDPIP = if ($d -eq 'ok') { $alias } else { VnetIp }
+    return ('alias=' + $alias + ' ' + $d)
   } catch { $script:RDPIP = VnetIp; return 'alias-failed: ' + $_.Exception.Message }
 }
 function Set-RdpAccount([string]$pw) {
-  # The browser form sends one fixed name, and this image ships no account by it (measured: net user
-  # answers HELPMSG 2221 "The user name could not be found"), so the account has to be made here.
-  # The pinned credential is short and numeric, which the image's complexity policy refuses, and a
-  # refused set leaves the account with no usable password -- which the browser can only report as a
-  # plain credential rejection. So relax that policy first, then make sure the account exists.
+  # The browser form sends one fixed name and this image ships no account by it, so the account has
+  # to be made here. Renaming the image's own RID-500 account was the earlier attempt: it takes the
+  # name the job itself runs under and leaves the network/CIM providers answering nothing to every
+  # later Get-Net* call, so build a separate account and leave the runner's identity alone.
+  # A short numeric credential is refused by the image's complexity policy, and a refused create or
+  # set leaves the account with no usable password -- which the browser can only report as a plain
+  # credential rejection. So retry once with the policy relaxed.
   $log = @()
-  & net accounts /minpwlen:0 2>&1 | Out-Null
-  $cfg = 'C:\sec-wm.inf'; $sdb = 'C:\sec-wm.sdb'
-  & secedit /export /cfg $cfg /areas SECURITYPOLICY 2>&1 | Out-Null
-  if (Test-Path $cfg) {
-    $inf = Get-Content $cfg
-    $inf = $inf -replace 'PasswordComplexity\s*=\s*1', 'PasswordComplexity = 0'
-    $inf = $inf -replace 'MinimumPasswordLength\s*=\s*\d+', 'MinimumPasswordLength = 0'
-    $inf | Set-Content -Path $cfg -Encoding Unicode
-    & secedit /configure /db $sdb /cfg $cfg /areas SECURITYPOLICY 2>&1 | Out-Null
-  }
   $nm = 'administrator'
   if (-not @(Get-LocalUser -Name $nm -EA SilentlyContinue).Count) {
-    # Prefer the built-in RID-500 account: give it back the exact name the form sends rather than
-    # leaving a second admin next to it.
-    $bi = @(Get-LocalUser -EA SilentlyContinue | Where-Object { $_.SID.Value.EndsWith('-500') })
-    if ($bi.Count) {
-      try { Rename-LocalUser -Name $bi[0].Name -NewName $nm -EA Stop; $log += ('renamed=' + $bi[0].Name) }
-      catch { $log += ('rename-failed=' + $_.Exception.Message) }
-    }
-    if (-not @(Get-LocalUser -Name $nm -EA SilentlyContinue).Count) {
-      & net user $nm $pw /add 2>&1 | Out-Null
-      $log += ('add=' + $LASTEXITCODE)
-    }
+    & net user $nm $pw /add 2>&1 | Out-Null
+    $log += ('add=' + $LASTEXITCODE)
   }
   & net user $nm $pw 2>&1 | Out-Null
   $log += ('set=' + $LASTEXITCODE)
+  if ($LASTEXITCODE -ne 0) {
+    & net accounts /minpwlen:0 2>&1 | Out-Null
+    $cfg = 'C:\sec-wm.inf'; $sdb = 'C:\sec-wm.sdb'
+    & secedit /export /cfg $cfg /areas SECURITYPOLICY 2>&1 | Out-Null
+    if (Test-Path $cfg) {
+      $inf = Get-Content $cfg
+      $inf = $inf -replace 'PasswordComplexity\s*=\s*1', 'PasswordComplexity = 0'
+      $inf = $inf -replace 'MinimumPasswordLength\s*=\s*\d+', 'MinimumPasswordLength = 0'
+      $inf | Set-Content -Path $cfg -Encoding Unicode
+      & secedit /configure /db $sdb /cfg $cfg /areas SECURITYPOLICY 2>&1 | Out-Null
+    }
+    if (-not @(Get-LocalUser -Name $nm -EA SilentlyContinue).Count) { & net user $nm $pw /add 2>&1 | Out-Null }
+    else { & net user $nm $pw 2>&1 | Out-Null }
+    $log += ('set2=' + $LASTEXITCODE)
+  }
   & net localgroup administrators $nm /add 2>&1 | Out-Null
   & net user $nm /active:yes 2>&1 | Out-Null
   $log += ('auth=' + (Test-Logon $pw))
