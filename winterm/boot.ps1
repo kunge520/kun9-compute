@@ -163,6 +163,45 @@ function Add-RdpAlias {
     return ('alias=' + $alias + $(if ($ok) { 'set' } else { 'FAILED' }) + ' dial=' + (Probe-Port $alias 3389))
   } catch { $script:RDPIP = VnetIp; return 'alias-failed: ' + $_.Exception.Message }
 }
+function Set-RdpAccount([string]$pw) {
+  # The browser form sends one fixed name, and this image ships no account by it (measured: net user
+  # answers HELPMSG 2221 "The user name could not be found"), so the account has to be made here.
+  # The pinned credential is short and numeric, which the image's complexity policy refuses, and a
+  # refused set leaves the account with no usable password -- which the browser can only report as a
+  # plain credential rejection. So relax that policy first, then make sure the account exists.
+  $log = @()
+  & net accounts /minpwlen:0 2>&1 | Out-Null
+  $cfg = 'C:\sec-wm.inf'; $sdb = 'C:\sec-wm.sdb'
+  & secedit /export /cfg $cfg /areas SECURITYPOLICY 2>&1 | Out-Null
+  if (Test-Path $cfg) {
+    $inf = Get-Content $cfg
+    $inf = $inf -replace 'PasswordComplexity\s*=\s*1', 'PasswordComplexity = 0'
+    $inf = $inf -replace 'MinimumPasswordLength\s*=\s*\d+', 'MinimumPasswordLength = 0'
+    $inf | Set-Content -Path $cfg -Encoding Unicode
+    & secedit /configure /db $sdb /cfg $cfg /areas SECURITYPOLICY 2>&1 | Out-Null
+  }
+  $nm = 'administrator'
+  if (-not @(Get-LocalUser -Name $nm -EA SilentlyContinue).Count) {
+    # Prefer the built-in RID-500 account: give it back the exact name the form sends rather than
+    # leaving a second admin next to it.
+    $bi = @(Get-LocalUser -EA SilentlyContinue | Where-Object { $_.SID.Value.EndsWith('-500') })
+    if ($bi.Count) {
+      try { Rename-LocalUser -Name $bi[0].Name -NewName $nm -EA Stop; $log += ('renamed=' + $bi[0].Name) }
+      catch { $log += ('rename-failed=' + $_.Exception.Message) }
+    }
+    if (-not @(Get-LocalUser -Name $nm -EA SilentlyContinue).Count) {
+      & net user $nm $pw /add 2>&1 | Out-Null
+      $log += ('add=' + $LASTEXITCODE)
+    }
+  }
+  & net user $nm $pw 2>&1 | Out-Null
+  $log += ('set=' + $LASTEXITCODE)
+  & net localgroup administrators $nm /add 2>&1 | Out-Null
+  & net user $nm /active:yes 2>&1 | Out-Null
+  $log += ('auth=' + (Test-Logon $pw))
+  $log += ('users=' + ((Get-LocalUser -EA SilentlyContinue | ForEach-Object { $_.Name }) -join '+'))
+  return ($log -join ' ')
+}
 function Enable-Rdp {
   # Two things stand between the runner image and Cloudflare's browser desktop. NLA (CredSSP) is on
   # by default and their client does not speak it, so the negotiation dies before a login prompt
@@ -173,35 +212,7 @@ function Enable-Rdp {
   try {
     Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -Force
     Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0 -Force
-    if ($FIXED) {
-      $msg = ((& net user administrator $FIXED 2>&1) -join ' ')
-      $set = $LASTEXITCODE
-      $complex = ''
-      if ($set -ne 0) {
-        # The pinned credential is short and numeric, so the image's complexity policy refuses it --
-        # and a refused set leaves the account with NO usable password, which the browser reports as
-        # a plain "rejected your username or password". Relax the local policy and retry; keep the
-        # failure text (never the password) so the heartbeat names the real reason.
-        & net accounts /minpwlen:0 2>&1 | Out-Null
-        $cfg = 'C:\sec-wm.inf'
-        $sdb = 'C:\sec-wm.sdb'
-        & secedit /export /cfg $cfg /areas SECURITYPOLICY 2>&1 | Out-Null
-        if (Test-Path $cfg) {
-          $inf = Get-Content $cfg
-          $inf = $inf -replace 'PasswordComplexity\s*=\s*1', 'PasswordComplexity = 0'
-          $inf = $inf -replace 'MinimumPasswordLength\s*=\s*\d+', 'MinimumPasswordLength = 0'
-          $inf | Set-Content -Path $cfg -Encoding Unicode
-          & secedit /configure /db $sdb /cfg $cfg /areas SECURITYPOLICY 2>&1 | Out-Null
-          $complex = (($inf | Where-Object { $_ -match 'PasswordComplexity' }) -join ';')
-        }
-        $msg = $msg + ' | after: ' + (((& net user administrator $FIXED 2>&1) -join ' '))
-        $set = $LASTEXITCODE
-      }
-      & net user administrator /active:yes 2>&1 | Out-Null
-      $msg = $msg -replace [regex]::Escape($FIXED), '<pw>'
-      if ($msg.Length -gt 170) { $msg = $msg.Substring(0, 170) }
-      $out += ('setpw=' + $set + ' ' + $complex + ' msg=' + $msg + ' len=' + $FIXED.Length + ' auth=' + (Test-Logon $FIXED))
-    } else { $out += 'pw=none' }
+    if ($FIXED) { $out += (Set-RdpAccount $FIXED) } else { $out += 'pw=none' }
     # The connector dials this machine's own virtual-network address, and the image's packet filter
     # refuses that at the socket layer -- the browser then reads "WSA 10013 permission denied" and
     # nothing on the RDP side is ever reached. There is no new exposure in opening it: the only way
