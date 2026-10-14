@@ -173,15 +173,18 @@ function Set-Account([string]$nm, [string]$pw) {
   return ($log -join ' ')
 }
 function Enable-Rdp {
-  # Two things stand between the runner image and Cloudflare's browser desktop. NLA (CredSSP) is on
-  # by default and their client does not speak it, so the negotiation dies before a login prompt
-  # ever appears. And the credential form in the browser is the ONLY prompt there is, so the account
-  # behind it needs a password this script knows, pinned to WT_RDP_PASS.
-  # Idempotent, so it runs at every boot and nothing has to be clicked for a fresh machine.
+  # Cloudflare's browser desktop is IronRDP, which authenticates through NLA/CredSSP: the credential
+  # form in the browser is not an in-session logon UI, it feeds a CredSSP handshake that happens
+  # BEFORE a session is built. So the server must REQUIRE NLA (UserAuthentication=1) or the browser
+  # sits at "Connecting as local account ..." forever -- the collected password has no CredSSP channel
+  # to travel on. (The old assumption that IronRDP "does not speak NLA" was backwards; NLA-off is what
+  # broke it.) The one credential form means the account behind it needs a password this script knows,
+  # pinned to WT_RDP_PASS. Idempotent, runs every boot, nothing to click for a fresh machine.
   $out = @()
   try {
     Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -Force
-    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0 -Force
+    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1 -Force
+    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name SecurityLayer -Value 2 -Force
     if ($FIXED) { $out += (Set-Account 'administrator' $FIXED) } else { $out += 'pw=none' }
     # The image's packet filter is irrelevant once the only way in is an Access-authenticated tunnel
     # this VM dials out to, and leaving it on is what made the connector's own dial fail.
