@@ -8,7 +8,8 @@ name: winterm
 # max expression length 21000"). So keep this file thin and put logic in the repo.
 #
 # The named-tunnel token and the fixed console login are repository Actions secrets
-# (WT_TUNNEL_TOKEN, WT_RDP_PASS -- the second name predates the change, it is the ttyd password now),
+# (WT_TUNNEL_TOKEN, WT_RDP_PASS -- the second name predates the change, it is the single fixed
+#  password for BOTH browser surfaces now: clientless RDP and clientless SSH, same credential),
 # so a fresh VM is reachable in the browser the moment it boots: nothing has to be handed in from
 # another machine first, and a start triggered by anyone -- including a schedule -- works.
 #
