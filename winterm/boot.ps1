@@ -2,7 +2,8 @@
 # terminal, self-configuring from repo secrets.
 # 2026-10-14: ttyd is gone. Two browser surfaces remain, both Cloudflare-native: clientless RDP (the
 # listener below) and clientless SSH (sshd, reached through the tunnel ingress ssh.kun9.ccwu.cc ->
-# ssh://localhost:22). Both carry the same fixed account. The named tunnel is here for both: the
+# ssh://localhost:22). Both take the same fixed password; SSH's account is named after the owner's
+# email prefix because the browser forces that username. The named tunnel is here for both: the
 # Access RDP app can only dial a private IP this tunnel routes to, and the SSH ingress is served by
 # the same connector.
 # Kept out of the workflow YAML on purpose: GitHub refuses to parse a step whose run block is
@@ -96,7 +97,7 @@ function VnetIp {
   } catch { }
   return ''
 }
-function Test-Logon([string]$pw) {
+function Test-Logon([string]$nm, [string]$pw) {
   # The browser can only say "the server rejected your username or password", which cannot tell a
   # wrong password from an account set that silently failed. Ask Windows directly with the same
   # credential the form sends, so the heartbeat names the real reason (1326 bad password, 1327 no
@@ -107,7 +108,7 @@ function Test-Logon([string]$pw) {
 [DllImport("kernel32.dll",SetLastError=true)] public static extern bool CloseHandle(System.IntPtr h);
 '@
     $tok = [IntPtr]::Zero
-    if ([WM.Logon]::LogonUser('administrator', '.', $pw, 2, 0, [ref]$tok)) {
+    if ([WM.Logon]::LogonUser($nm, '.', $pw, 2, 0, [ref]$tok)) {
       [void][WM.Logon]::CloseHandle($tok)
       return 'ok'
     }
@@ -137,14 +138,12 @@ function Add-RdpAlias {
     return ('alias=' + $alias + ' ' + $d)
   } catch { $script:RDPIP = VnetIp; return 'alias-failed: ' + $_.Exception.Message }
 }
-function Set-RdpAccount([string]$pw) {
-  # The browser form sends one fixed name and this image ships no account by it, so the account has
-  # to be made here (see the runneradmin note in the header). A short numeric credential is refused
-  # by the image's complexity policy, and a refused create or set leaves the account with no usable
+function Set-Account([string]$nm, [string]$pw) {
+  # A local account the browser forms can log in with. A short numeric credential is refused by the
+  # image's complexity policy, and a refused create or set leaves the account with no usable
   # password -- which the browser can only report as a plain credential rejection. So retry once
   # with the policy relaxed.
   $log = @()
-  $nm = 'administrator'
   if (-not @(Get-LocalUser -Name $nm -EA SilentlyContinue).Count) {
     & net user $nm $pw /add 2>&1 | Out-Null
     $log += ('add=' + $LASTEXITCODE)
@@ -168,7 +167,8 @@ function Set-RdpAccount([string]$pw) {
   }
   & net localgroup administrators $nm /add 2>&1 | Out-Null
   & net user $nm /active:yes 2>&1 | Out-Null
-  $log += ('auth=' + (Test-Logon $pw))
+  & wmic useraccount where "name='$nm'" set PasswordExpires=false 2>&1 | Out-Null
+  $log += ('auth=' + (Test-Logon $nm $pw))
   return ($log -join ' ')
 }
 function Enable-Rdp {
@@ -181,7 +181,7 @@ function Enable-Rdp {
   try {
     Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -Force
     Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0 -Force
-    if ($FIXED) { $out += (Set-RdpAccount $FIXED) } else { $out += 'pw=none' }
+    if ($FIXED) { $out += (Set-Account 'administrator' $FIXED) } else { $out += 'pw=none' }
     # The image's packet filter is irrelevant once the only way in is an Access-authenticated tunnel
     # this VM dials out to, and leaving it on is what made the connector's own dial fail.
     New-NetFirewallRule -Name winterm-rdp -DisplayName 'winterm browser RDP' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -Profile Any -EA SilentlyContinue | Out-Null
@@ -197,8 +197,9 @@ function Enable-Rdp {
 }
 function Enable-Ssh {
   # The browser terminal is Cloudflare's clientless SSH now: the tunnel carries ssh.kun9.ccwu.cc ->
-  # ssh://localhost:22, so the VM only has to serve sshd. Same account the RDP form uses, so one
-  # credential opens both. Idempotent, run every boot.
+  # ssh://localhost:22, so the VM only has to serve sshd. The browser forces the SSH username to the
+  # Access email prefix, so the account must be named after it; its password is the same fixed one
+  # the RDP form uses. Idempotent, run every boot.
   $out = @()
   try {
     $cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' -EA SilentlyContinue | Select-Object -First 1
@@ -208,9 +209,11 @@ function Enable-Ssh {
     }
     Set-Service -Name sshd -StartupType Automatic -EA SilentlyContinue
     Start-Service sshd -EA SilentlyContinue
+    if ($FIXED) { $out += ('acct=' + (Set-Account $SSHUSER $FIXED)) } else { $out += 'pw=none' }
     New-NetFirewallRule -Name winterm-ssh -DisplayName 'winterm browser SSH' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 22 -Profile Any -EA SilentlyContinue | Out-Null
     New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -Value 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -PropertyType String -Force -EA SilentlyContinue | Out-Null
     $out += ('sshd=' + (Get-Service sshd -EA SilentlyContinue).Status)
+    $out += ('user=' + $SSHUSER)
     $out += ('dial22=' + (Probe-Port '127.0.0.1' 22))
   } catch { $out += 'ssh-failed: ' + $_.Exception.Message }
   $script:SSHINFO = $out -join ' '
@@ -297,6 +300,9 @@ if (-not $OK_CF) {
 
 # ---- desktop credentials ----
 $FIXED = "$env:WT_RDP_PASS".Trim()
+# Clientless SSH ignores whatever the form types and logs in as the Access email prefix, so the
+# Windows account it needs is named after the owner's address (645478520@qq.com) rather than chosen.
+$SSHUSER = '645478520'
 $OPENED = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 $ENDS = (Get-Date).ToUniversalTime().AddSeconds($SECS).ToString('yyyy-MM-ddTHH:mm:ssZ')
 
