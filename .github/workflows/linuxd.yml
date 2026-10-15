@@ -11,49 +11,26 @@ name: linuxd
 # No new secrets: WT_TUNNEL_TOKEN is the connector, WT_RDP_PASS is the password for SSH (runner/root)
 # and for the RDP desktop, CST_S3_* mount the capsule's github bucket under ~/capsule.
 #
-# Power works exactly like the Windows box: `schedule` is the only Actions trigger that fires without
-# a token, so this 15-minute watchdog asks the panel /api/claim?m=linux whether a start is queued. The
-# Worker refuses to hand out a start while a heartbeat is fresh or a run is live -- on either machine,
-# because the two share one runner budget and one set of hostnames.
-# The interval is deliberately lazy: this job runs around the clock whether or not anything is queued,
-# and a queued start waiting a few extra minutes is a better trade than 3x the daily run count.
+# POWERING THIS MACHINE FROM THE WEB PANEL -- ONE PATH
+# ------------------------------------------------------------
+# 开机 makes the Worker POST workflow_dispatch to this file, so a runner starts the moment the button
+# is pressed; editing trigger.linuxd boots the same box for the same reason. Stopping is the mirror
+# image: boot.sh polls /api/power and ends its own run when the panel asks for it, which releases the
+# runner. Nothing is scheduled, so no job runs around the clock waiting for a request.
+# The Worker dispatches only when no heartbeat of either box is fresh and no run of either workflow is
+# live -- the two share one runner budget and one set of hostnames, so they can never overlap.
 
 on:
   push:
     paths:
       - trigger.linuxd
-  schedule:
-    - cron: '*/15 * * * *'
   workflow_dispatch: {}
 
 permissions:
   contents: write
 
 jobs:
-  wake:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      go: ${{ steps.claim.outputs.go }}
-    steps:
-      - id: claim
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" != "schedule" ]; then
-            echo "manual start (push/dispatch), no claim needed"
-            echo "go=yes" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          r=$(curl -s --max-time 20 'https://ctl.kun9.ccwu.cc/api/claim?m=linux' || true)
-          echo "claim says: $r"
-          case "$r" in
-            *'"action":"start"'*) echo "go=yes" >> "$GITHUB_OUTPUT" ;;
-            *) echo "go=no" >> "$GITHUB_OUTPUT" ;;
-          esac
-
   linuxd:
-    needs: wake
-    if: needs.wake.outputs.go == 'yes'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:

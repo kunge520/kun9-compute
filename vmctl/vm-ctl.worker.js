@@ -2,13 +2,14 @@
 // kun9 VM control panel — one page that turns the GitHub free Windows runner on and off.
 //
 //
-// Power is credential-free by default: winterm.yml runs a 15-minute watchdog whose first job is to
-// ask this Worker "is a start queued?" (/api/claim). If yes the Windows job runs; if no it finishes
-// in a few seconds. Stopping is the mirror image: the panel writes a stop flag here and the live VM
-// reads it on its next heartbeat (/api/power) and ends its own run. A fine-grained token pasted at
-// /token only replaces the watchdog step with an instant dispatch.
+// Power is one path each way. 开机 makes this Worker POST workflow_dispatch to GitHub, so a runner
+// picks it up in seconds; if the dispatch fails, the panel says so and nothing quietly happens later.
+// Stopping is the mirror image: the panel writes a stop flag here and the live VM reads it on its next
+// heartbeat (/api/power) and ends its own run.
 //
-// The secrets kept in this Worker are PANEL_KEY, the password for the page, and that optional token.
+// Dispatch needs a repo Actions token, which is what /token stores here, so without it 开机 reports
+// the missing token instead of falling back to something slower. The secrets kept in this Worker are
+// PANEL_KEY, the password for the page, and that token.
 
 const REPO = 'kunge520/kun9-compute';
 const API = 'https://api.github.com';
@@ -55,23 +56,13 @@ export default {
 
     // ---- machine-facing endpoints: no cookie, they answer nothing a runner could abuse ----
     // ?m=linux selects the Ubuntu box; no parameter means the Windows box, which is what winterm.yml
-    // has always sent.
-    if (url.pathname === '/api/claim') {
-      const m = pick(url.searchParams.get('m'));
-      const q = await read(env, m.pw);
-      if (!q || q.action !== 'start') return send(JSON.stringify({ action: 'none' }), 'application/json');
-      if (await busy(env, m)) return send(JSON.stringify({ action: 'wait', reason: 'busy' }), 'application/json');
-      await env.STORE.delete(m.pw);
-      // Fifteen minutes is only the gap between a claimed start and that machine's first
-      // heartbeat; longer would let a runner killed before it published refuse new starts.
-      await env.STORE.put(m.bt, '1', { expirationTtl: 900 });
-      return send(JSON.stringify({ action: 'start', queued_at: q.at }), 'application/json');
-    }
+    // has always sent. There is no /api/claim any more: a start is dispatched by the panel itself, so
+    // nothing on the runner side ever has to ask for one.
     if (url.pathname === '/api/power') {
       const m = pick(url.searchParams.get('m'));
-      // The live VM is the only thing that polls this, so its first poll is also the proof that
-      // the claimed start actually became a machine -- which lets the panel trust 'booting' for
-      // the few minutes between claim and boot, and drop it the moment the boot is real.
+      // The live VM is the only thing that polls this, so its first poll is also the proof that the
+      // dispatched start actually became a machine -- which is what clears the 'booting' flag that
+      // busy() has been holding since the dispatch.
       if (env.STORE && (await env.STORE.get(m.bt))) await env.STORE.delete(m.bt);
       const q = await read(env, m.pw);
       return send(JSON.stringify({ action: q && (q.action === 'stop' || q.action === 'rdp') ? q.action : 'none' }), 'application/json');
@@ -253,44 +244,38 @@ export default {
         await env.STORE.put(m.pw, JSON.stringify({ action: 'rdp', at: new Date().toISOString() }), { expirationTtl: 300 });
         return send(JSON.stringify({ ok: true, note: '已下发，机器 20 秒内重配桌面并回报连通性' }), 'application/json');
       }
-      if (want === 'start' && await busy(env, null)) {
+      if (want === 'start' && await busy(env)) {
         return send(JSON.stringify({ ok: false, note: '已经有机器在跑或正在开机，先关机再说' }), 'application/json', 409);
+      }
+      // 开机 is the dispatch and nothing else: GitHub takes it now, so there is no queue record for a
+      // start -- that record is only ever read by a live machine, so a queued start would be a stop
+      // request for whichever machine comes up next. A failed dispatch says so and sets nothing.
+      if (want === 'start') {
+        if (!(await token(env))) return send(JSON.stringify({ ok: false, note: '开机需要一个 Actions 令牌，先去 /token 贴一个' }), 'application/json', 409);
+        // Clear any leftover stop flag first: the machine that should have read it is gone, and the
+        // one coming up must not be handed someone's old 关机.
+        await env.STORE.delete(m.pw);
+        const r = await gh(env, '/repos/' + REPO + '/actions/workflows/' + m.wf + '/dispatches', { method: 'POST', body: { ref: 'main' } });
+        if (r.status !== 204) return send(JSON.stringify({ ok: false, note: '即时触发失败：' + (r.note || r.status) }), 'application/json', 502);
+        // The flag holds busy() across the whole bring-up -- the runner handover, then the Linux box's
+        // 5-8 minutes of apt -- and the machine's first /api/power poll is what clears it.
+        await env.STORE.put(m.bt, '1', { expirationTtl: 1200 });
+        // The Linux box pulls xfce4 + Xvnc/noVNC through apt on every boot, so its honest estimate is
+        // longer than the Windows one -- a wrong ETA reads as a hung machine.
+        return send(JSON.stringify({ ok: true, note: '已触发，再等 ' + (m === MACH.linux ? '5-8' : '2-3') + ' 分钟装好环境' }), 'application/json');
       }
       // A second 关机 within a minute is the same request, so remember what is already pending
       // before overwriting it: only a request the machine sat on earns a hard cancel.
       const prev = await read(env, m.pw);
-      // Both flags expire: a start is good for an hour (GitHub can hold the first tick of a
-      // freshly-added cron well past five minutes, and a queued start that never got claimed is
-      // not worth an hour of a machine nobody asked for either), and a stop the current machine
-      // never got to read must not kill the next one.
+      // It expires so that a stop the current machine never got to read cannot kill the next one.
       await env.STORE.put(m.pw, JSON.stringify({ action: want, at: new Date().toISOString() }), { expirationTtl: 3600 });
-      // "booting" has to outlive the whole wait, not just the queue step: a start may not be picked up
-      // until the 15th minute, and the Linux box then spends 5-8 more minutes on apt before its first
-      // heartbeat. busy() reads this flag to stop a second machine being queued onto one still coming
-      // up, so a short TTL here would let exactly that through.
-      if (want === 'start') await env.STORE.put(m.bt, '1', { expirationTtl: 2700 });
-      // The Linux box pulls xfce4 + Xvnc/noVNC through apt on every boot, so its honest estimate is
-      // longer than the Windows one -- a wrong ETA reads as a hung machine.
-      let note = want === 'start'
-        ? '已排队，最迟 15 分钟内开始接手，再等 ' + (m === MACH.linux ? '5-8' : '2-3') + ' 分钟装好环境'
-        : '已下发关机，机器最多 20 秒后自停';
-
-      // Optional accelerator: one fine-grained token (this repo, Actions write) pasted at /token
-      // turns a queued start into a dispatch, and gives 关机 a force button. The flag is the
-      // polite stop and it works -- a live machine reads it inside 20 seconds and leaves by
-      // itself, writing the dead record on the way out. Only a machine that ignored the request
-      // (same flag still pending a minute later) needs the run cancelled, because a runner that
-      // squats holds both the free minutes and busy(), which is what blocks the next 开机.
+      let note = '已下发关机，机器最多 20 秒后自停';
+      // The flag is the polite stop and it works -- a live machine reads it inside 20 seconds and
+      // leaves by itself, writing the dead record on the way out. Only a machine that ignored the
+      // request (the same flag still pending a minute later) needs the run cancelled, because a
+      // runner that squats holds both the free minutes and busy(), which is what blocks 开机 again.
       if (await token(env)) {
-        if (want === 'start') {
-          const r = await gh(env, '/repos/' + REPO + '/actions/workflows/' + m.wf + '/dispatches', { method: 'POST', body: { ref: 'main' } });
-          if (r.status === 204) {
-            await env.STORE.delete(m.pw);
-            note = '已即时触发，就绪后刷新页面';
-          } else {
-            note += '（即时触发失败：' + (r.note || r.status) + '，看门狗兜底）';
-          }
-        } else if (prev && prev.action === 'stop' && prev.at && !fresh(prev.at, 60)) {
+        if (prev && prev.action === 'stop' && prev.at && !fresh(prev.at, 60)) {
           // The authenticated run list is the authority on whether anything is still running; the
           // record's own run_id only counts while the machine claims to be alive, because GitHub
           // rejects a cancel on a finished run and the flag would then sit there until it kills
@@ -316,6 +301,8 @@ export default {
         } else {
           note += '，60 秒后还在就再按一次关机强制取消';
         }
+      } else {
+        note += '，没配令牌就取消不了卡死的任务';
       }
       return send(JSON.stringify({ ok: true, note: note }), 'application/json');
     }
@@ -366,16 +353,14 @@ async function gh(env, path, opts) {
   return { status: res.status, json: json, note: json && json.message ? String(json.message).slice(0, 160) : '' };
 }
 
-// Never bring up a second machine: the watchdog may only claim a start when no heartbeat of EITHER
-// box is fresh and no run of EITHER workflow is still queued or in progress. The mutex is global on
-// purpose -- both boxes share one tunnel and one hostname pair, so two live connectors would split
-// the same address between them.
-// ignoreM is the machine doing the claiming: its own 'booting' flag is the very request it is here to
-// consume, so it must not read as evidence of a machine; every other flag must.
-async function busy(env, ignoreM) {
+// Never bring up a second machine: 开机 only dispatches when no heartbeat of EITHER box is fresh and
+// no run of EITHER workflow is still queued or in progress. The mutex is global on purpose
+// -- both boxes share one tunnel and one hostname pair, so two live connectors would split the same
+// address between them.
+async function busy(env) {
   for (const k of KEYS) {
     const m = MACH[k];
-    if (m !== ignoreM && env.STORE && (await env.STORE.get(m.bt))) return true;
+    if (env.STORE && (await env.STORE.get(m.bt))) return true;
     const s = await session(true, m);
     if (s && s.alive && fresh(s.check, 180)) return true;
     const r = await runs(env, m);
@@ -555,9 +540,10 @@ function page(title, mode) {
   }
   if (mode === '令牌') {
     return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
-      '<title>' + title + ' · 可选：即时开机</title><style>' + css() + '</style></head><body><div class="wrap">' +
-      '<form class="card login" id="f"><h1>贴一个专用小令牌（可选）</h1>' +
-      '<p>不贴也能用：开机走 15 分钟一次的 Actions 检查。贴上以后开机变成即时触发，关机照旧靠机器自己退出。' +
+      '<title>' + title + ' · 开机令牌</title><style>' + css() + '</style></head><body><div class="wrap">' +
+      '<form class="card login" id="f"><h1>贴一个 GitHub 开机令牌</h1>' +
+      '<p>开机就是即时触发 GitHub Actions，这一步需要一个令牌；关机不用，机器自己读到标记就退出。' +
+      '面板下方显示「已配令牌」时说明已经有了，不用再来。' +
       '<a href="https://github.com/settings/personal-access-tokens/new" target="_blank">在这里建令牌</a>：' +
       'Repository access 选 Only select repositories → kunge520/kun9-compute，Permissions 只勾 Actions: Read and write。' +
       '它只存在这个 Worker 里，页面永远不会把它回显出来。</p>' +
@@ -567,7 +553,7 @@ function page(title, mode) {
       '<script>document.getElementById("f").onsubmit=async function(e){e.preventDefault();' +
       'var m=document.getElementById("m");m.textContent="校验中…";' +
       'var r=await fetch("/api/token",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({t:document.getElementById("t").value})});' +
-      'var j=await r.json().catch(function(){return {}});m.textContent=j.ok?(j.note+"（回面板按开机就是秒开）"):("不行："+(j.note||r.status));' +
+      'var j=await r.json().catch(function(){return {}});m.textContent=j.ok?(j.note+"（回面板按开机，机器立刻开始启动）"):("不行："+(j.note||r.status));' +
       'if(j.ok){document.getElementById("t").value=\'\'}};</script></body></html>';
   }
   return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
@@ -707,12 +693,11 @@ function app() {
     " var phase='';",
     " if(alive){dot.className='dot on';st.textContent='运行中'}",
     " else if(runLive){phase='boot';dot.className='dot wait';st.textContent='开机中'}",
-    " else if(q&&q.action==='start'){phase='queue';dot.className='dot wait';st.textContent='排队开机'}",
     " else if(q&&q.action==='stop'){dot.className='dot wait';st.textContent='关机中'}",
     " else {dot.className='dot';st.textContent='已关机'}",
     " waiting=!!phase;",
     " $('wait').style.display=phase?'':'none';",
-    " if(phase){$('ph').textContent=phase==='boot'?'正在准备系统，还没上报':'已排队，下一次检查最迟 15 分钟后开始';wait0=(new Date(String(phase==='boot'?(u.created||''):(q.at||''))).getTime())||0;}",
+    " if(phase){$('ph').textContent='已触发，正在准备系统，还没上报';wait0=(new Date(String(u.created||'')).getTime())||0;}",
     " else $('hint').textContent='';",
     " VURL=alive?(v.url||''):'';$('url').textContent=(alive&&v.url)?v.url:'-';",
     " $('user').textContent=alive?(v.user||'-'):(M==='linux'?'root':'administrator');",
@@ -734,16 +719,16 @@ function app() {
     " $('log').href=u.url||'https://github.com/kunge520/kun9-compute/actions';",
     " $('bssh').disabled=!alive;",
     " $('brdp').disabled=!alive||(M==='linux'&&!VURL);",
-    " $('bstart').disabled=!!(alive||runLive||(q&&q.action==='start'));",
+    " $('bstart').disabled=!!(alive||runLive);",
     " $('bstop').disabled=!(alive||runLive)&&!(q&&q.action==='stop');",
-    " $('tok').textContent=r.has_token?'已配令牌':'配令牌（可选）';",
+    " $('tok').textContent=r.has_token?'已配令牌':'未配令牌，开机不可用';",
     " if(v.ends&&alive){var ms=new Date(v.ends).getTime()-Date.now();$('left').innerHTML=ms>0?('剩余 <b>'+Math.floor(ms/60000)+' 分 '+String(Math.floor(ms%60000/1000)).padStart(2,'0')+' 秒</b>'):'<b>已到期</b>';}",
     " else $('left').innerHTML=alive?'':'<b>每次开机都是全新机器</b>';",
     " $('upd').textContent='更新于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});",
     "}",
     "$('bssh').onclick=function(){window.open(SSHBASE,'_blank')};",
-    "$('bstart').onclick=async function(){say('正在排队…');var x=await post('/api/queue',{action:'start',m:M});say(x.j.note||(x.j.ok?'已排队，马上开始':'开机失败：'+(x.j.note||x.code)),!x.j.ok);setTimeout(tick,1500)};",
-    "$('bstop').onclick=async function(){if(!confirm('确定关机？机器上的内容会全部清空，这是每次开机的正常结局。'))return;say('正在通知机器退出…');var x=await post('/api/queue',{action:'stop',m:M});say(x.j.note||(x.j.ok?'已下发，机器会在下一次检查时退出':'关机失败：'+(x.j.note||x.code)),!x.j.ok);setTimeout(tick,1500)};",
+    "$('bstart').onclick=async function(){say('正在触发开机…');var x=await post('/api/queue',{action:'start',m:M});say(x.j.note||(x.j.ok?'已触发':'开机失败：'+(x.j.note||x.code)),!x.j.ok);setTimeout(tick,1500)};",
+    "$('bstop').onclick=async function(){if(!confirm('确定关机？机器上的内容会全部清空，这是每次开机的正常结局。'))return;say('正在通知机器退出…');var x=await post('/api/queue',{action:'stop',m:M});say(x.j.note||(x.j.ok?'已下发，机器自己会退出':'关机失败：'+(x.j.note||x.code)),!x.j.ok);setTimeout(tick,1500)};",
     "var SSHBASE='" + SSH_APP + "';",
     "var RDPURL='" + RDP_APP + '/rdp/' + RDP_VNET + '/' + RDP_TARGET + "/3389';",
     "$('brdp').onclick=function(){window.open(M==='linux'?VURL:RDPURL,'_blank')};",
