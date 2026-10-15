@@ -68,8 +68,10 @@ export default {
     }
     if (req.method === 'POST' && url.pathname === '/api/power/clear') {
       const m = pick(url.searchParams.get('m'));
-      const q = await read(env, m.pw);
-      if (q && (q.action === 'stop' || q.action === 'rdp')) await env.STORE.delete(m.pw);
+      // Deleted without reading first: KV can serve a write from a few seconds earlier as missing, and a
+      // stop the machine has already obeyed must not survive that race for the rest of its TTL -- the
+      // panel would keep saying 关机中 for an hour after a clean shutdown.
+      await env.STORE.delete(m.pw);
       await env.STORE.delete(m.bt);
       return send(JSON.stringify({ ok: true }), 'application/json');
     }
