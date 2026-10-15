@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 # linuxd boot: a Linux learning box out of one free GitHub runner (public repo = the minutes cost
 # nothing). Same connection scheme as winterm, on purpose: the SAME named tunnel (kun9-wt) and the
-# SAME hostnames, because only one of the two machines ever runs, so ssh.kun9.ccwu.cc and
-# rdp.kun9.ccwu.cc always point at whichever machine is alive. The tunnel's ingress is stored
-# server-side and targets loopback (ssh://127.0.0.1:22, tcp 3389), so Linux only has to listen there.
+# SAME hostname for the terminal, because only one of the two machines ever runs, so
+# ssh.kun9.ccwu.cc always points at whichever machine is alive. The tunnel's ingress is stored
+# server-side and targets loopback (ssh://127.0.0.1:22), so Linux only has to listen there.
+#
+# The desktop is the one place the two boxes differ, and it has to: Cloudflare's web RDP client is
+# IronRDP and it cannot display xrdp (see EnableDesktop). So the desktop leaves through its own quick
+# tunnel as VNC and noVNC draws it in the browser -- still no client software, still one click.
 #
 # Everything is one credential: WT_RDP_PASS is the password for ssh (runner/root), for the browser
-# SSH terminal and for the browser RDP desktop. WT_TUNNEL_TOKEN is the connector token.
+# SSH terminal and for the VNC desktop. WT_TUNNEL_TOKEN is the named-connector token.
 # CST_S3_AKID/CST_S3_AKSEC mount the capsule's `github` bucket, the Windows box's Z: under ~.
 #
 # Desktop order matters for a different reason than it does on Windows: sshd and the tunnel come up
 # first and publish a heartbeat, so the machine is reachable inside a minute while apt is still
-# pulling xfce4 and xrdp. Nothing here is a dependency of anything else -- a failed desktop install
-# leaves a working SSH box.
+# pulling xfce4 and tigervnc. Nothing here is a dependency of anything else -- a failed desktop
+# install leaves a working SSH box.
 
 set +e
 cd "$GITHUB_WORKSPACE" || exit 1
@@ -36,12 +40,15 @@ OPENED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ENDS=$(date -u -d "+$SECS seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
 RESTARTS=0
 NOTEG='ssh up'
-RDPG='not-installed'
+DESKG='not-installed'
+DESKURL=''
 CAPG='not-armed'
 CFPG='down'
 DBGURL=''
 DBGPG='down'
 DBGPORT=48220
+VNCPORT=5901
+WEBPORT=6080
 
 log() { echo "[$(date -u +%H:%M:%S)] $*"; }
 
@@ -147,39 +154,73 @@ StartDbgTunnel() {
   return 1
 }
 
-# ---- desktop: xrdp + XFCE, reached through the Access RDP app on rdp.kun9.ccwu.cc ----
-EnableRdp() {
-  if [ ! -x /usr/sbin/xrdp ]; then
-    log 'installing xfce4 + xrdp (this is the slow part)'
+# ---- desktop: XFCE on a VNC display, drawn in the browser by noVNC ----
+# Why this is not RDP like the Windows box: Cloudflare's web RDP client is IronRDP, and with xrdp the
+# two never agree. xrdp 0.9.24 has no NLA, so IronRDP sends no Client Info credentials at all (sesman
+# logged zero login attempts for every click), xrdp then paints its OWN login window with classic
+# bitmap orders, and the web client renders that as diagonal shearing -- before either side has drawn
+# a desktop. Cache, compression and channel toggles each made it worse or killed the session outright
+# (drdynvc is mandatory for IronRDP), and Ubuntu has no newer xrdp to move to. VNC has no such trap:
+# the framebuffer crosses a plain WebSocket and noVNC is the very renderer Cloudflare itself uses for
+# browser VNC. A quick tunnel also needs no account permission, unlike a new hostname on kun9-wt --
+# the tunnel's ingress cannot be written with this token.
+EnableDesktop() {
+  if [ ! -x /usr/bin/Xvnc ]; then
+    log 'installing xfce4 + tigervnc + novnc (this is the slow part)'
     sudo apt-get update -qq
     # fonts-wqy-microhei so the desktop renders Chinese, not empty boxes.
     sudo apt-get install -y -qq --no-install-recommends xfce4 xfce4-terminal xfce4-goodies \
-      xorg xorgxrdp xrdp dbus-x11 fonts-wqy-microhei || { RDPG='apt-fail'; return 1; }
-    sudo adduser xrdp ssl-cert >/dev/null 2>&1
+      dbus-x11 fonts-wqy-microhei tigervnc-standalone-server tigervnc-common tigervnc-tools \
+      novnc websockify || { DESKG='apt-fail'; return 1; }
   fi
-  # Replaced, not probed: startwm.sh differs between images and whatever it does by default, execing
-  # startxfce4 is the whole requirement for a session that IronRDP can display. The runtime dir is
-  # created because the session user is root, and /run/user/0 does not exist on a runner.
-  printf '#!/bin/sh\nexport XDG_RUNTIME_DIR=/run/user/$(id -u)\nmkdir -p "$XDG_RUNTIME_DIR"\nchmod 700 "$XDG_RUNTIME_DIR"\nexec startxfce4\n' | sudo tee /etc/xrdp/startwm.sh >/dev/null
-  sudo chmod +x /etc/xrdp/startwm.sh
-  # Cloudflare's browser client never puts the username/password into the RDP Client Info PDU (sesman
-  # logs show zero login attempts), so xrdp falls back to drawing its OWN login window -- and that
-  # window is painted with classic bitmap orders that the web client renders as diagonal garbage.
-  # Nothing can be typed into a garbled box, so the box is removed: the section carries root's
-  # credentials and autorun picks it, which drops the client straight into the desktop.
-  if [ -n "$WT_RDP_PASS" ]; then
-    sudo sed -i -e "/^\[Xorg\]/,/^\$/ s/^username=ask\$/username=root/" \
-                -e "/^\[Xorg\]/,/^\$/ s/^password=ask\$/password=$WT_RDP_PASS/" /etc/xrdp/xrdp.ini
-  fi
-  sudo sed -i 's/^autorun=$/autorun=Xorg/' /etc/xrdp/xrdp.ini
-  grep -q '^autorun=Xorg' /etc/xrdp/xrdp.ini || log 'xrdp.ini: autorun 没写进去，网页桌面会停在 xrdp 自己的登录框'
-  # The file now holds a password: readable by root and by the xrdp user only (xrdp must read it).
-  sudo chown root:xrdp /etc/xrdp/xrdp.ini && sudo chmod 640 /etc/xrdp/xrdp.ini
-  sudo service xrdp restart >/dev/null 2>&1 || sudo service xrdp start >/dev/null 2>&1
-  sleep 3
-  if ss -tln 2>/dev/null | grep -q ':3389 '; then RDPG='listening'; log 'xrdp listening on 3389'; return 0; fi
-  RDPG='not-listening'
-  log 'xrdp NOT listening on 3389'
+  # Root owns the display, because root is the account he logs in as and the capsule has to show up in
+  # its 文件管理器. /run/user/0 does not exist on a runner and xfce4 complains without it.
+  sudo mkdir -p /root/.vnc /run/user/0
+  sudo chmod 700 /run/user/0
+  # vncpasswd is the only writer of that file's odd 8-byte DES form, so the one credential everything
+  # else uses is piped in rather than hand-rolled.
+  printf '%s\n%s\n' "$WT_RDP_PASS" "$WT_RDP_PASS" | sudo vncpasswd /root/.vnc/passwd >/dev/null 2>&1
+  sudo chmod 600 /root/.vnc/passwd
+  # -localhost: 5901 is reachable from this box only, which leaves the quick tunnel below as the way in
+  # and VncAuth as the gate. -AlwaysShared so a dropped tab cannot leave the display locked.
+  pgrep -x Xvnc >/dev/null || sudo bash -c \
+    "nohup env HOME=/root XDG_RUNTIME_DIR=/run/user/0 /usr/bin/Xvnc :1 -geometry 1280x800 -depth 24 \
+     -SecurityTypes VncAuth -PasswordFile /root/.vnc/passwd -localhost yes -rfbport $VNCPORT \
+     -AlwaysShared >/root/xvnc.log 2>&1 &"
+  local i
+  for i in $(seq 1 10); do
+    ss -tln 2>/dev/null | grep -q ":$VNCPORT " && break
+    sleep 1
+  done
+  ss -tln 2>/dev/null | grep -q ":$VNCPORT " || { DESKG='no-xvnc'; return 1; }
+  pgrep -x xfce4-session >/dev/null || sudo bash -c \
+    "nohup env DISPLAY=:1 HOME=/root USER=root XDG_RUNTIME_DIR=/run/user/0 startxfce4 >/root/wm.log 2>&1 &"
+  pgrep -x websockify >/dev/null || nohup /usr/bin/websockify --web=/usr/share/novnc \
+    "127.0.0.1:$WEBPORT" "127.0.0.1:$VNCPORT" >"$HOME/cf/ws.log" 2>&1 &
+  for i in $(seq 1 8); do
+    curl -s --max-time 3 -o /dev/null "http://127.0.0.1:$WEBPORT/vnc.html" && return 0
+    sleep 2
+  done
+  DESKG='no-web'
+  return 1
+}
+
+# The desktop link is published in the heartbeat, so the random host is his problem never to remember:
+# 打开桌面 on the panel reads it straight from there. autoconnect+password are both noVNC URL settings
+# (app/ui.js reads them), which makes the click land on the desktop with nothing typed.
+StartDesktopTunnel() {
+  local d="$HOME/cf" u i
+  rm -f "$d/dt.log"
+  nohup "$d/cloudflared" tunnel --no-autoupdate --url "http://127.0.0.1:$WEBPORT" \
+    --logfile "$d/dt.log" >"$d/dt.out" 2>&1 &
+  for i in $(seq 1 20); do
+    sleep 2
+    u=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$d/dt.log" 2>/dev/null | head -1)
+    [ -n "$u" ] && {
+      DESKURL="$u/vnc.html?autoconnect=true&resize=scale&password=$WT_RDP_PASS"
+      DESKG='listening'; log "desktop at $u"; return 0; }
+  done
+  DESKG='no-tunnel-url'
   return 1
 }
 
@@ -232,9 +273,9 @@ SyncHead() {
 Publish() {
   local note="$1"
   local json
-  json=$(printf '{"alive":true,"machine":"linux","run_id":"%s","check":"%s","url":"https://rdp.kun9.ccwu.cc","ssh_url":"https://ssh.kun9.ccwu.cc","user":"runner","ttl_min":%s,"opened":"%s","ends":"%s","named":"%s","restarts":%s,"rdp_diag":"%s","rdp_info":"%s","ssh_info":"%s","capsule":"%s","dbg_url":"%s","dbg_diag":"%s","note":"%s"}' \
-    "$GITHUB_RUN_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$MIN" "$OPENED" "$ENDS" "$CFPG" "$RESTARTS" \
-    "$RDPG" "tcp://localhost:3389" "sshd 127.0.0.1:22 user=runner" "$CAPG" "$DBGURL" "$DBGPG" "$note")
+  json=$(printf '{"alive":true,"machine":"linux","run_id":"%s","check":"%s","url":"%s","ssh_url":"https://ssh.kun9.ccwu.cc","user":"root","ttl_min":%s,"opened":"%s","ends":"%s","named":"%s","restarts":%s,"rdp_diag":"%s","rdp_info":"%s","ssh_info":"%s","capsule":"%s","dbg_url":"%s","dbg_diag":"%s","note":"%s"}' \
+    "$GITHUB_RUN_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DESKURL" "$MIN" "$OPENED" "$ENDS" "$CFPG" "$RESTARTS" \
+    "$DESKG" "vnc 127.0.0.1:$VNCPORT" "sshd 127.0.0.1:22 user=root" "$CAPG" "$DBGURL" "$DBGPG" "$note")
   echo "LINUXD-JSON $json"
   local i
   for i in 1 2 3; do
@@ -262,27 +303,28 @@ log 'boot: debug channel'
 StartDbgListener && StartDbgTunnel
 Publish 'booting: ssh+tunnel+dbg up, desktop installing'
 
-( EnableRdp;   log "desktop: $RDPG" ) & RDPJOB=$!
+( EnableDesktop && StartDesktopTunnel; log "desktop: $DESKG" ) & DESKJOB=$!
 ( sleep 1; EnableCapsule; log "capsule: $CAPG" ) & CAPJOB=$!
 # Bare `wait` would never return -- the tunnel and the debug listener are background jobs of this
 # same shell and run for the whole session, which would leave the machine up but unsupervised (no
 # heartbeat refresh, no panel stop). Wait on the two installs by pid.
-wait "$RDPJOB"; wait "$CAPJOB"
+wait "$DESKJOB"; wait "$CAPJOB"
 
-# A background job cannot set a variable in its parent shell, so RDPG/CAPG still hold their initial
+# A background job cannot set a variable in its parent shell, so DESKG/CAPG still hold their initial
 # values no matter what the installs did. Read the truth back from the system instead. A diagnosis
 # that came from the install itself (apt-fail, no-key, rclone-missing) is kept -- only the two
 # never-ran/stale-mounted states get rewritten.
 Probe() {
-  if ss -tln 2>/dev/null | grep -q ':3389 '; then RDPG='listening'
-  elif [ "$RDPG" = listening ]; then RDPG='not-listening'; fi
+  if curl -s --max-time 3 -o /dev/null "http://127.0.0.1:$WEBPORT/vnc.html" && [ -n "$DESKURL" ]; then
+    DESKG='listening'
+  elif [ "$DESKG" = listening ]; then DESKG='not-listening'; fi
   if mountpoint -q "$HOME/capsule" 2>/dev/null; then CAPG="mounted $HOME/capsule"
   elif [ "$CAPG" = not-armed ] || [ "$CAPG" = "mounted $HOME/capsule" ]; then CAPG='not-mounted'; fi
 }
 Probe
 
-Publish "desktop=$RDPG capsule=$CAPG dbg=$DBGPG"
-log "reachable: https://ssh.kun9.ccwu.cc  (runner / \$WT_RDP_PASS)  ttl=${MIN}m"
+Publish "desktop=$DESKG capsule=$CAPG dbg=$DBGPG"
+log "reachable: ssh root@ssh.kun9.ccwu.cc  desktop=${DESKURL:-none}  ttl=${MIN}m"
 
 # ---- supervise: keep the tunnel alive, obey the panel, refresh the heartbeat ----
 END_TS=$(date -u -d "+$SECS seconds" +%s 2>/dev/null || echo $(( $(date -u +%s) + SECS )))
@@ -300,7 +342,7 @@ while [ "$(date -u +%s)" -lt "$END_TS" ]; do
       log 'panel asked for stop, exiting'; break ;;
     *'"action":"rdp"'*)
       curl -s --max-time 8 -X POST "$CTL/api/power/clear?m=linux" >/dev/null 2>&1
-      EnableRdp; CHANGED=1; Publish "rdp: $RDPG"; LASTP=$(date -u +%s) ;;
+      EnableDesktop && StartDesktopTunnel; CHANGED=1; Publish "desktop: $DESKG"; LASTP=$(date -u +%s) ;;
   esac
 
   if ! pgrep -f 'cloudflared.*run --token' >/dev/null 2>&1; then
@@ -320,6 +362,17 @@ while [ "$(date -u +%s)" -lt "$END_TS" ]; do
     StartDbgTunnel; CHANGED=1
   fi
 
+  # Desktop: Xvnc, websockify and its own quick tunnel. The page is probed locally and the tunnel by
+  # its own pid pattern, because a live page behind a dead tunnel is exactly as unreachable as a dead
+  # page -- and only the tunnel check can tell the two apart.
+  if ! curl -s --max-time 4 -o /dev/null "http://127.0.0.1:$WEBPORT/vnc.html"; then
+    log 'desktop web gone, restarting'
+    EnableDesktop && StartDesktopTunnel; CHANGED=1
+  elif ! pgrep -f "url http://127.0.0.1:$WEBPORT" >/dev/null 2>&1; then
+    log 'desktop tunnel gone, restarting'
+    StartDesktopTunnel; CHANGED=1
+  fi
+
   if ! mountpoint -q "$HOME/capsule" 2>/dev/null && [ $(( $(date -u +%s) - ${LASTC:-0} )) -ge 120 ]; then
     LASTC=$(date -u +%s); EnableCapsule; CHANGED=1
   fi
@@ -327,14 +380,14 @@ while [ "$(date -u +%s)" -lt "$END_TS" ]; do
   if [ $(( $(date -u +%s) - LASTP )) -ge 60 ] || [ "$CHANGED" = 1 ]; then
     LASTP=$(date -u +%s)
     Probe
-    Publish "desktop=$RDPG capsule=$CAPG dbg=$DBGPG"
+    Publish "desktop=$DESKG capsule=$CAPG dbg=$DBGPG"
   fi
 done
 
 # Dead record last, and written after the sync: SyncHead hard-resets the checkout, so a file written
 # before it would be discarded before it ever got committed.
 SyncHead
-printf '{"alive":false,"machine":"linux","run_id":"%s","url":"https://rdp.kun9.ccwu.cc","ssh_url":"https://ssh.kun9.ccwu.cc","user":"runner","closed":"%s","named":"%s","restarts":%s,"ttl_min":%s,"dbg_url":"%s"}\n' \
+printf '{"alive":false,"machine":"linux","run_id":"%s","url":"","ssh_url":"https://ssh.kun9.ccwu.cc","user":"root","closed":"%s","named":"%s","restarts":%s,"ttl_min":%s,"dbg_url":"%s"}\n' \
   "$GITHUB_RUN_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$CFPG" "$RESTARTS" "$MIN" "$DBGURL" >"$SESSION"
 git add -f "$SESSION"
 git commit -qm "linuxd closed $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1

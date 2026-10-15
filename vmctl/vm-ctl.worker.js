@@ -661,11 +661,12 @@ function app() {
     "function fmt(t){if(!t)return '-';var d=new Date(t);return isNaN(d)?t:d.toLocaleString('zh-CN',{hour12:false})}",
     "function post(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}).then(function(r){return r.json().then(function(j){return {code:r.status,j:j}})})}",
     "function say(m){$('msg').textContent=m||''}",
-    "var HINTS=['GitHub 的免费 Windows 机器要先排队领用，这一步最慢','正在装 Git / cloudflared','隧道在握手，第一次连会慢一点','整条链路一般是 2-4 分钟','机器起来后按「打开桌面」或「打开终端」','趁这个空档可以去倒杯水','开机期间再按一次开机是没用的，按钮会自己变灰','桌面走 RDP，终端走 SSH，都是 Cloudflare 直出，不用装客户端'];",
+    "var HINTS=['GitHub 的免费 Windows 机器要先排队领用，这一步最慢','正在装 Git / cloudflared','隧道在握手，第一次连会慢一点','整条链路一般是 2-4 分钟','机器起来后按「打开桌面」或「打开终端」','趁这个空档可以去倒杯水','开机期间再按一次开机是没用的，按钮会自己变灰','桌面和终端都是 Cloudflare 直出，浏览器点开就行，不用装客户端'];",
     "var waiting=false,wait0=0,hintI=0,hintAt=0;",
-    // One view, two machines. M is the selected machine and every call carries it; the RDP/SSH links
-    // are NOT machine-specific, because both boxes share the tunnel and the hostnames.
-    "var M='win';",
+    // One view, two machines. M is the selected machine and every call carries it. The SSH link is the
+    // same for both boxes because they share the tunnel and the hostname; the desktop link is not --
+    // Windows goes to the fixed Access RDP app, Linux to the noVNC URL it publishes each boot.
+    "var M='win',VURL='';",
     "function setM(x){M=x;$('m-win').className=x==='win'?'on':'';$('m-linux').className=x==='linux'?'on':'';tick();}",
     "$('m-win').onclick=function(){setM('win')};",
     "$('m-linux').onclick=function(){setM('linux')};",
@@ -683,8 +684,8 @@ function app() {
     " waiting=!!phase;",
     " $('wait').style.display=phase?'':'none';",
     " if(phase){$('ph').textContent=phase==='boot'?'正在开机：机器还没开始上报':'排队开机：等看门狗接手';wait0=(new Date(String(phase==='boot'?(u.created||''):(q.at||''))).getTime())||0;}",
-    " $('url').textContent=v.url||'-';",
-    " $('user').textContent=alive?(v.user||'-'):(M==='linux'?'runner':'administrator');",
+    " VURL=alive?(v.url||''):'';$('url').textContent=v.url||'-';",
+    " $('user').textContent=alive?(v.user||'-'):(M==='linux'?'root':'administrator');",
     " $('ends').textContent=fmt(v.ends);",
     " $('check').textContent=fmt(v.check);",
     " $('run').textContent=u?('#'+(u.number||'')+' '+u.status+(u.conclusion?' / '+u.conclusion:'')):'-';",
@@ -694,7 +695,7 @@ function app() {
     " $('note').innerHTML=(v.note?('状态：'+esc(v.note)+(v.restarts>0?(' · 隧道重连过 '+esc(v.restarts)+' 次'):'')):'')+(v.rdp?('<br>桌面 '+esc(v.rdp)):'')+(v.origin?('<br>终端 '+esc(v.origin)):'')+(v.capsule?('<br>胶囊 '+esc(v.capsule)):'')+(r.error?('<br>'+esc(r.error)):'')+extra;",
     " $('log').href=u.url||'https://github.com/kunge520/kun9-compute/actions';",
     " $('bssh').disabled=!alive;",
-    " $('brdp').disabled=!alive;",
+    " $('brdp').disabled=!alive||(M==='linux'&&!VURL);",
     " $('bstart').disabled=!!(alive||runLive||(q&&q.action==='start'));",
     " $('bstop').disabled=!(alive||runLive)&&!(q&&q.action==='stop');",
     " $('tok').textContent=r.has_token?'已配令牌（秒开机）':'配令牌（可选，秒开机）';",
@@ -707,7 +708,7 @@ function app() {
     "$('bstop').onclick=async function(){if(!confirm('确定关机？这台机器上的未保存内容会丢。'))return;say('正在下发关机…');var x=await post('/api/queue',{action:'stop',m:M});say(x.j.note||(x.j.ok?'已下发':'关机失败：'+x.code));setTimeout(tick,1500)};",
     "var SSHBASE='" + SSH_APP + "';",
     "var RDPURL='" + RDP_APP + '/rdp/' + RDP_VNET + '/' + RDP_TARGET + "/3389';",
-    "$('brdp').onclick=function(){window.open(RDPURL,'_blank')};",
+    "$('brdp').onclick=function(){window.open(M==='linux'?VURL:RDPURL,'_blank')};",
     "setInterval(function(){",
     " if(!waiting)return;",
     " var s=wait0?Math.max(0,Math.round((Date.now()-wait0)/1000)):0;",
