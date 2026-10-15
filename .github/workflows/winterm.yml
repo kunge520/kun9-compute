@@ -70,6 +70,8 @@ jobs:
         env:
           WT_TUNNEL_TOKEN: ${{ secrets.WT_TUNNEL_TOKEN }}
           WT_RDP_PASS: ${{ secrets.WT_RDP_PASS }}
+          CST_S3_AKID: ${{ secrets.CST_S3_AKID }}
+          CST_S3_AKSEC: ${{ secrets.CST_S3_AKSEC }}
         run: |
           Write-Host ('token_len=' + $env:WT_TUNNEL_TOKEN.Length + ' pass_len=' + $env:WT_RDP_PASS.Length)
           & .\winterm\boot.ps1
