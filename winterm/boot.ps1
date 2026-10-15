@@ -291,25 +291,36 @@ function Get-Binary([string]$url, [string]$out, [int]$minBytes) {
   return $false
 }
 # ---- data capsule: the owner's S3 bucket, mounted as Z: ----
+$script:CAPARMED = $false
+$script:CAPLAST = (Get-Date).AddDays(-1)
 # Best-effort convenience, never a dependency: whatever happens here only shows up in the note
-# the panel reads, and the desktop still comes up. Every file goes under TEMP so the heartbeat
-# commit can never pick up a credential file.
-function Start-CapsuleMount {
-  try {
-    Start-Process -FilePath $script:CAPRC -ArgumentList @('--config', $script:CAPCONF, 'mount', 'capsule:github', 'Z:',
-      '--no-console', '--volname', 'data', '--vfs-cache-mode', 'writes', '--dir-cache-time', '30s',
-      '--log-level', 'INFO', '--log-file', (Join-Path $env:TEMP 'cap.log')) -WindowStyle Hidden | Out-Null
-  } catch { return 'spawn-fail' }
-  for ($i = 0; $i -lt 20; $i++) {
+# the panel reads, and the desktop still comes up. The mount itself is NOT started here -- a drive
+# letter belongs to the logon session that created it, and this job's session is never the desktop
+# session, so what worked in Test-Path was invisible on the desktop. It is installed as a logon task
+# for the RDP account instead, so the drive appears in the session that actually uses it.
+$script:CAPTASK = 'winterm-capsule'
+function Get-CapDiag {
+  # The process list is machine-wide, so a mount started in the desktop session is visible here even
+  # though its drive letter is not.
+  if ((Get-Process rclone -EA SilentlyContinue | Measure-Object).Count -gt 0) { return 'mounted' }
+  return 'armed'
+}
+function Start-CapsuleTask {
+  try { & schtasks /run /tn $script:CAPTASK 2>&1 | Out-Null } catch { }
+  for ($i = 0; $i -lt 5; $i++) {
     Start-Sleep -Seconds 2
-    if (Test-Path 'Z:\') { return 'ok' }
+    if ((Get-CapDiag) -eq 'mounted') { return 'mounted' }
   }
-  return 'no-drive: ' + (Tail (Join-Path $env:TEMP 'cap.log') 2)
+  return (Get-CapDiag)
 }
 
 function Enable-Capsule {
   if (-not "$env:CST_S3_AKID") { return 'no-key' }
-  $t = $env:TEMP
+  $t = Join-Path $env:ProgramData 'winterm'
+  if (-not (Test-Path $t)) { New-Item -ItemType Directory -Path $t -Force -EA SilentlyContinue | Out-Null }
+  # The key file has to live where the desktop account can read it, so it is off TEMP and locked to
+  # admins -- the heartbeat commit only ever covers the repo working tree.
+  & icacls $t /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' /Q 2>&1 | Out-Null
   $exe = Join-Path $t 'rclone.exe'
   if (-not (Test-Path $exe)) {
     if (-not (Get-Binary 'https://downloads.rclone.org/rclone-current-windows-amd64.zip' (Join-Path $t 'rc.zip') 5MB)) { return 'rclone-dl-fail' }
@@ -318,7 +329,6 @@ function Enable-Capsule {
     if (-not $f) { return 'rclone-missing' }
     Copy-Item $f.FullName $exe -Force
   }
-  $script:CAPRC = $exe
   # WinFsp is the FUSE driver rclone mounts through; the MSI is idempotent, so no version probe.
   $msi = Join-Path $t 'winfsp.msi'
   if (-not (Test-Path $msi)) { Get-Binary 'https://github.com/winfsp/winfsp/releases/download/v2.0/winfsp-2.0.23075.msi' $msi 500KB | Out-Null }
@@ -334,9 +344,19 @@ function Enable-Capsule {
   $L += ('secret_access_key = ' + "$env:CST_S3_AKSEC".Trim())
   $L += 'endpoint = s3.cstcloud.cn'
   $L += 'addressing_style = path'
-  Set-Content -Path (Join-Path $t 'cap.conf') -Value ($L -join "`r`n") -Encoding ascii
-  $script:CAPCONF = Join-Path $t 'cap.conf'
-  return (Start-CapsuleMount)
+  $conf = Join-Path $t 'cap.conf'
+  Set-Content -Path $conf -Value ($L -join "`r`n") -Encoding ascii
+  $arg = '--config "' + $conf + '" mount capsule:github Z: --no-console --volname data ' +
+    '--vfs-cache-mode writes --dir-cache-time 30s --log-level INFO --log-file "' + (Join-Path $t 'cap.log') + '"'
+  try {
+    $a = New-ScheduledTaskAction -Execute $exe -Argument $arg
+    $tr = New-ScheduledTaskTrigger -AtLogOn -User 'administrator'
+    $st = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+    $st.ExecutionTimeLimit = 'PT0S'
+    Register-ScheduledTask -TaskName $script:CAPTASK -Action $a -Trigger $tr -Settings $st -RunLevel Highest -User 'administrator' -Force | Out-Null
+    $script:CAPARMED = $true
+  } catch { return 'reg-fail: ' + $_.Exception.Message }
+  return (Start-CapsuleTask)
 }
 
 $OK_CF = Get-Binary 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' (Join-Path $work 'cf.exe') 10MB
@@ -438,12 +458,18 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
     $changed = $true
   }
 
-  if ($script:CAPRC -and $script:CAPDIAG -eq 'ok') {
-    $CRN = (Get-Process rclone -EA SilentlyContinue | Measure-Object).Count
-    if ($CRN -eq 0) {
-      Write-Host 'capsule mount gone, remounting'
-      $script:CAPDIAG = Start-CapsuleMount
-      $changed = $true
+  if ($script:CAPARMED) {
+    $script:CAPDIAG = Get-CapDiag
+    # Only chase a missing mount while someone is actually logged on -- otherwise 'armed' is the
+    # honest state and the logon trigger does the work. The cooldown stops a failing mount from
+    # turning every poll into a heartbeat commit.
+    if ($script:CAPDIAG -eq 'armed' -and ((Get-Date) - $script:CAPLAST).TotalSeconds -ge 180) {
+      if ((& query user 2>&1 | Out-String) -match 'Active') {
+        Write-Host 'capsule mount gone, re-arming'
+        $script:CAPLAST = Get-Date
+        $script:CAPDIAG = Start-CapsuleTask
+        $changed = $true
+      }
     }
   }
 
