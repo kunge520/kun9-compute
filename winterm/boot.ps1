@@ -323,9 +323,6 @@ function Enable-Capsule {
   if (-not "$env:CST_S3_AKID") { return 'no-key' }
   $t = Join-Path $env:ProgramData 'winterm'
   if (-not (Test-Path $t)) { New-Item -ItemType Directory -Path $t -Force -EA SilentlyContinue | Out-Null }
-  # The key file has to live where the desktop account can read it, so it is off TEMP and locked to
-  # admins -- the heartbeat commit only ever covers the repo working tree.
-  & icacls $t /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' /Q 2>&1 | Out-Null
   $exe = Join-Path $t 'rclone.exe'
   if (-not (Test-Path $exe)) {
     if (-not (Get-Binary 'https://downloads.rclone.org/rclone-current-windows-amd64.zip' (Join-Path $t 'rc.zip') 5MB)) { return 'rclone-dl-fail' }
@@ -351,6 +348,9 @@ function Enable-Capsule {
   $L += 'addressing_style = path'
   $conf = Join-Path $t 'cap.conf'
   Set-Content -Path $conf -Value ($L -join "`r`n") -Encoding ascii
+  # Only the config file (which carries the S3 secret) is locked; the directory keeps inherited
+  # permissions so rclone.exe stays executable from any session.
+  & icacls $conf /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' /Q 2>&1 | Out-Null
   $arg = '--config "' + $conf + '" mount capsule:github Z: --no-console --volname data ' +
     '--vfs-cache-mode writes --dir-cache-time 30s --log-level INFO --log-file "' + (Join-Path $t 'cap.log') + '"'
   try {
