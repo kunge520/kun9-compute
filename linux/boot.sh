@@ -161,6 +161,12 @@ EnableRdp() {
   # startxfce4 is the whole requirement for a session that IronRDP can display.
   printf '#!/bin/sh\nexport XDG_RUNTIME_DIR=/run/user/$(id -u)\nexec startxfce4\n' | sudo tee /etc/xrdp/startwm.sh >/dev/null
   sudo chmod +x /etc/xrdp/startwm.sh
+  # autorun=Xorg: with it empty xrdp answers a client that sends credentials (Cloudflare's IronRDP does)
+  # by drawing its OWN login window, and that window is painted with classic bitmap updates the web
+  # client renders as diagonal garbage -- the desktop never even starts. Naming the section makes xrdp
+  # log the client's username straight into Xorg instead.
+  sudo sed -i 's/^autorun=$/autorun=Xorg/' /etc/xrdp/xrdp.ini
+  grep -q '^autorun=Xorg' /etc/xrdp/xrdp.ini || echo 'xrdp.ini: autorun not set, 网页桌面会停在 xrdp 自己的登录框'
   sudo service xrdp restart >/dev/null 2>&1 || sudo service xrdp start >/dev/null 2>&1
   sleep 3
   if ss -tln 2>/dev/null | grep -q ':3389 '; then RDPG='listening'; log 'xrdp listening on 3389'; return 0; fi
