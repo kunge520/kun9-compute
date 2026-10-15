@@ -301,12 +301,16 @@ $script:CAPLAST = (Get-Date).AddDays(-1)
 # for the RDP account instead, so the drive appears in the session that actually uses it.
 $script:CAPTASK = 'winterm-capsule'
 function Get-CapDiag {
-  # The process list is machine-wide, so a mount started in the desktop session is visible here even
-  # though its drive letter is not.
-  if ((Get-Process rclone -EA SilentlyContinue | Measure-Object).Count -gt 0) { return 'mounted' }
+  # A drive letter belongs to the logon session that created it, so a running rclone only counts when
+  # it runs in a desktop session: one in session 0 is healthy, invisible, and holds the letter the
+  # desktop needs. The process table is machine-wide, which is why the session id is checked here.
+  $p = @(Get-Process rclone -EA SilentlyContinue)
+  if (@($p | Where-Object { $_.SessionId -gt 0 }).Count -gt 0) { return 'mounted' }
+  if ($p.Count -gt 0) { return 'wrong-session' }
   return 'armed'
 }
 function Start-CapsuleTask {
+  try { Get-Process rclone -EA SilentlyContinue | Where-Object { $_.SessionId -eq 0 } | Stop-Process -Force -EA SilentlyContinue } catch { }
   try { & schtasks /run /tn $script:CAPTASK 2>&1 | Out-Null } catch { }
   for ($i = 0; $i -lt 5; $i++) {
     Start-Sleep -Seconds 2
@@ -354,7 +358,11 @@ function Enable-Capsule {
     $tr = New-ScheduledTaskTrigger -AtLogOn -User 'administrator'
     $st = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
     $st.ExecutionTimeLimit = 'PT0S'
-    Register-ScheduledTask -TaskName $script:CAPTASK -Action $a -Trigger $tr -Settings $st -RunLevel Highest -User 'administrator' -Force | Out-Null
+    # -User without -Password registers "run whether logged on or not", which is a session-0 logon:
+    # the mount then works but its drive letter never reaches the desktop. Interactive is the whole
+    # point of the task, so the principal is spelled out.
+    $pr = New-ScheduledTaskPrincipal -UserId 'administrator' -LogonType Interactive -RunLevel Highest
+    Register-ScheduledTask -TaskName $script:CAPTASK -Action $a -Trigger $tr -Settings $st -Principal $pr -Force | Out-Null
     $script:CAPARMED = $true
   } catch { return 'reg-fail: ' + $_.Exception.Message }
   return (Start-CapsuleTask)
@@ -464,7 +472,7 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
     # Only chase a missing mount while someone is actually logged on -- otherwise 'armed' is the
     # honest state and the logon trigger does the work. The cooldown stops a failing mount from
     # turning every poll into a heartbeat commit.
-    if ($script:CAPDIAG -eq 'armed' -and ((Get-Date) - $script:CAPLAST).TotalSeconds -ge 180) {
+    if ($script:CAPDIAG -ne 'mounted' -and ((Get-Date) - $script:CAPLAST).TotalSeconds -ge 60) {
       if ((& query user 2>&1 | Out-String) -match 'Active') {
         Write-Host 'capsule mount gone, re-arming'
         $script:CAPLAST = Get-Date
