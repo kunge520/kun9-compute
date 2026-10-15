@@ -290,6 +290,55 @@ function Get-Binary([string]$url, [string]$out, [int]$minBytes) {
   }
   return $false
 }
+# ---- data capsule: the owner's S3 bucket, mounted as Z: ----
+# Best-effort convenience, never a dependency: whatever happens here only shows up in the note
+# the panel reads, and the desktop still comes up. Every file goes under TEMP so the heartbeat
+# commit can never pick up a credential file.
+function Start-CapsuleMount {
+  try {
+    Start-Process -FilePath $script:CAPRC -ArgumentList @('--config', $script:CAPCONF, 'mount', 'capsule:github', 'Z:',
+      '--no-console', '--volname', 'data', '--vfs-cache-mode', 'writes', '--dir-cache-time', '30s',
+      '--log-level', 'INFO', '--log-file', (Join-Path $env:TEMP 'cap.log')) -WindowStyle Hidden | Out-Null
+  } catch { return 'spawn-fail' }
+  for ($i = 0; $i -lt 20; $i++) {
+    Start-Sleep -Seconds 2
+    if (Test-Path 'Z:\') { return 'ok' }
+  }
+  return 'no-drive: ' + (Tail (Join-Path $env:TEMP 'cap.log') 2)
+}
+
+function Enable-Capsule {
+  if (-not "$env:CST_S3_AKID") { return 'no-key' }
+  $t = $env:TEMP
+  $exe = Join-Path $t 'rclone.exe'
+  if (-not (Test-Path $exe)) {
+    if (-not (Get-Binary 'https://downloads.rclone.org/rclone-current-windows-amd64.zip' (Join-Path $t 'rc.zip') 5MB)) { return 'rclone-dl-fail' }
+    try { Expand-Archive (Join-Path $t 'rc.zip') -DestinationPath (Join-Path $t 'rcdir') -Force } catch { return 'rclone-unzip-fail' }
+    $f = (Get-ChildItem (Join-Path $t 'rcdir') -Recurse -Filter rclone.exe -EA SilentlyContinue | Select-Object -First 1)
+    if (-not $f) { return 'rclone-missing' }
+    Copy-Item $f.FullName $exe -Force
+  }
+  $script:CAPRC = $exe
+  # WinFsp is the FUSE driver rclone mounts through; the MSI is idempotent, so no version probe.
+  $msi = Join-Path $t 'winfsp.msi'
+  if (-not (Test-Path $msi)) { Get-Binary 'https://github.com/winfsp/winfsp/releases/download/v2.0/winfsp-2.0.23075.msi' $msi 500KB | Out-Null }
+  if (Test-Path $msi) {
+    try { Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn', '/norestart') -Wait -PassThru | Out-Null } catch { }
+  } else { return 'winfsp-dl-fail' }
+  $L = @()
+  $L += '[capsule]'
+  $L += 'type = s3'
+  $L += 'provider = Other'
+  $L += 'env_auth = false'
+  $L += ('access_key_id = ' + "$env:CST_S3_AKID".Trim())
+  $L += ('secret_access_key = ' + "$env:CST_S3_AKSEC".Trim())
+  $L += 'endpoint = s3.cstcloud.cn'
+  $L += 'addressing_style = path'
+  Set-Content -Path (Join-Path $t 'cap.conf') -Value ($L -join "`r`n") -Encoding ascii
+  $script:CAPCONF = Join-Path $t 'cap.conf'
+  return (Start-CapsuleMount)
+}
+
 $OK_CF = Get-Binary 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' (Join-Path $work 'cf.exe') 10MB
 Write-Host ('cloudflared ' + (Get-Item (Join-Path $work 'cf.exe') -EA SilentlyContinue).Length + 'B ok=' + $OK_CF)
 if (-not $OK_CF) {
@@ -343,7 +392,9 @@ if ($env:WT_TUNNEL_TOKEN) {
 
 $script:RESTARTS = 0
 $NPN = (Get-Process cfn -EA SilentlyContinue | Measure-Object).Count
-Publish @{ note = 'rdp ready, named=' + $NAMED }
+$script:CAPDIAG = Enable-Capsule
+Write-Host ('capsule at boot: ' + $CAPDIAG)
+Publish @{ note = ('rdp ready, named=' + $NAMED + ' capsule=' + $CAPDIAG) }
 
 # ---- supervise: keep the tunnel alive and obey the panel ----
 $until = (Get-Date).ToUniversalTime().AddSeconds($SECS)
@@ -387,8 +438,17 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
     $changed = $true
   }
 
+  if ($script:CAPRC -and $script:CAPDIAG -eq 'ok') {
+    $CRN = (Get-Process rclone -EA SilentlyContinue | Measure-Object).Count
+    if ($CRN -eq 0) {
+      Write-Host 'capsule mount gone, remounting'
+      $script:CAPDIAG = Start-CapsuleMount
+      $changed = $true
+    }
+  }
+
   if ($changed -or ((Get-Date) - $lastPublish).TotalSeconds -ge 60) {
-    Publish @{ note = 'named=' + $NAMED }
+    Publish @{ note = ('named=' + $NAMED + ' capsule=' + $script:CAPDIAG) }
     $lastPublish = Get-Date
   }
 }
