@@ -6,8 +6,9 @@
 # server-side and targets loopback (ssh://127.0.0.1:22), so Linux only has to listen there.
 #
 # The desktop is the one place the two boxes differ, and it has to: Cloudflare's web RDP client is
-# IronRDP and it cannot display xrdp (see EnableDesktop). So the desktop leaves through its own quick
-# tunnel as VNC and noVNC draws it in the browser -- still no client software, still one click.
+# IronRDP and it cannot display xrdp (see EnableDesktop). So this box serves VNC and lets noVNC draw
+# it, through a hostname route on the SAME named tunnel as the terminal -- vnc.kun9.ccwu.cc is fixed,
+# owned by the tunnel, and gated by an Access policy, so nothing about a boot has to mint a URL.
 #
 # Everything is one credential: WT_RDP_PASS is the password for ssh (runner/root), for the browser
 # SSH terminal and for the VNC desktop. WT_TUNNEL_TOKEN is the named-connector token.
@@ -41,7 +42,9 @@ ENDS=$(date -u -d "+$SECS seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%
 RESTARTS=0
 NOTEG='ssh up'
 DESKG='not-installed'
-DESKURL=''
+# autoconnect and password are both noVNC URL settings (app/ui.js reads them), so one click lands on
+# the desktop with nothing typed. Fixed because the hostname is fixed: nothing here is learned at boot.
+DESKURL="https://vnc.kun9.ccwu.cc/vnc.html?autoconnect=true&resize=scale&password=$WT_RDP_PASS"
 CAPG='not-armed'
 CFPG='down'
 DBGURL=''
@@ -181,8 +184,9 @@ EnableDesktop() {
   # else uses is piped in rather than hand-rolled.
   printf '%s\n%s\n' "$WT_RDP_PASS" "$WT_RDP_PASS" | sudo vncpasswd /root/.vnc/passwd >/dev/null 2>&1
   sudo chmod 600 /root/.vnc/passwd
-  # -localhost: 5901 is reachable from this box only, which leaves the quick tunnel below as the way in
-  # and VncAuth as the gate. -AlwaysShared so a dropped tab cannot leave the display locked.
+  # -localhost: 5901 is reachable from this box only, which leaves websockify (and through it the
+  # tunnel's vnc. route) as the only way in, with VncAuth as the gate. -AlwaysShared so a dropped tab
+  # cannot leave the display locked.
   pgrep -x Xvnc >/dev/null || sudo bash -c \
     "nohup env HOME=/root XDG_RUNTIME_DIR=/run/user/0 /usr/bin/Xvnc :1 -geometry 1280x800 -depth 24 \
      -SecurityTypes VncAuth -PasswordFile /root/.vnc/passwd -localhost yes -rfbport $VNCPORT \
@@ -202,25 +206,6 @@ EnableDesktop() {
     sleep 2
   done
   DESKG='no-web'
-  return 1
-}
-
-# The link is built in one place because the desktop is installed in a background job: the parent
-# shell has to be able to rebuild it from the tunnel's log. autoconnect+password are both noVNC URL
-# settings (app/ui.js reads them), so the click lands on the desktop with nothing typed.
-DeskLink() { printf '%s/vnc.html?autoconnect=true&resize=scale&password=%s' "$1" "$WT_RDP_PASS"; }
-
-StartDesktopTunnel() {
-  local d="$HOME/cf" u i
-  rm -f "$d/dt.log"
-  nohup "$d/cloudflared" tunnel --no-autoupdate --url "http://127.0.0.1:$WEBPORT" \
-    --logfile "$d/dt.log" >"$d/dt.out" 2>&1 &
-  for i in $(seq 1 20); do
-    sleep 2
-    u=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$d/dt.log" 2>/dev/null | head -1)
-    [ -n "$u" ] && { DESKURL=$(DeskLink "$u"); DESKG='listening'; log "desktop at $u"; return 0; }
-  done
-  DESKG='no-tunnel-url'
   return 1
 }
 
@@ -303,26 +288,19 @@ log 'boot: debug channel'
 StartDbgListener && StartDbgTunnel
 Publish 'booting: ssh+tunnel+dbg up, desktop installing'
 
-( EnableDesktop && StartDesktopTunnel; log "desktop: $DESKG" ) & DESKJOB=$!
+( EnableDesktop; log "desktop: $DESKG" ) & DESKJOB=$!
 ( sleep 1; EnableCapsule; log "capsule: $CAPG" ) & CAPJOB=$!
 # Bare `wait` would never return -- the tunnel and the debug listener are background jobs of this
 # same shell and run for the whole session, which would leave the machine up but unsupervised (no
 # heartbeat refresh, no panel stop). Wait on the two installs by pid.
 wait "$DESKJOB"; wait "$CAPJOB"
 
-# A background job cannot set a variable in its parent shell, so DESKG/DESKURL/CAPG still hold their
-# initial values no matter what the installs did. Read the truth back from the system instead -- the
-# tunnel's own log gives the link, the local page gives the state, the mount table gives the capsule.
-# A diagnosis that came from the install itself (apt-fail, no-key, rclone-missing) is kept: only the
-# never-ran/stale states get rewritten.
+# A background job cannot set a variable in its parent shell, so DESKG/CAPG still hold their initial
+# values no matter what the installs did. Read the truth back from the system instead: the local page
+# for the desktop, the mount table for the capsule. A diagnosis that came from the install itself
+# (apt-fail, no-key, rclone-missing) is kept: only the never-ran/stale states get rewritten.
 Probe() {
-  local u
-  if [ -z "$DESKURL" ]; then
-    u=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$HOME/cf/dt.log" 2>/dev/null | head -1)
-    [ -n "$u" ] && DESKURL=$(DeskLink "$u")
-  fi
-  if [ -n "$DESKURL" ] && curl -s --max-time 3 -o /dev/null "http://127.0.0.1:$WEBPORT/vnc.html"; then
-    DESKG='listening'
+  if curl -s --max-time 3 -o /dev/null "http://127.0.0.1:$WEBPORT/vnc.html"; then DESKG='listening'
   elif [ "$DESKG" = listening ]; then DESKG='not-listening'; fi
   if mountpoint -q "$HOME/capsule" 2>/dev/null; then CAPG="mounted $HOME/capsule"
   elif [ "$CAPG" = not-armed ] || [ "$CAPG" = "mounted $HOME/capsule" ]; then CAPG='not-mounted'; fi
@@ -348,7 +326,7 @@ while [ "$(date -u +%s)" -lt "$END_TS" ]; do
       log 'panel asked for stop, exiting'; break ;;
     *'"action":"rdp"'*)
       curl -s --max-time 8 -X POST "$CTL/api/power/clear?m=linux" >/dev/null 2>&1
-      EnableDesktop && StartDesktopTunnel; CHANGED=1; Publish "desktop: $DESKG"; LASTP=$(date -u +%s) ;;
+      EnableDesktop; CHANGED=1; Publish "desktop: $DESKG"; LASTP=$(date -u +%s) ;;
   esac
 
   if ! pgrep -f 'cloudflared.*run --token' >/dev/null 2>&1; then
@@ -368,15 +346,11 @@ while [ "$(date -u +%s)" -lt "$END_TS" ]; do
     StartDbgTunnel; CHANGED=1
   fi
 
-  # Desktop: Xvnc, websockify and its own quick tunnel. The page is probed locally and the tunnel by
-  # its own pid pattern, because a live page behind a dead tunnel is exactly as unreachable as a dead
-  # page -- and only the tunnel check can tell the two apart.
+  # Desktop: Xvnc, xfce and websockify, all probed through the one page that needs all three. The
+  # route to it is the tunnel's own and is checked by the named-tunnel block above.
   if ! curl -s --max-time 4 -o /dev/null "http://127.0.0.1:$WEBPORT/vnc.html"; then
     log 'desktop web gone, restarting'
-    EnableDesktop && StartDesktopTunnel; CHANGED=1
-  elif ! pgrep -f "url http://127.0.0.1:$WEBPORT" >/dev/null 2>&1; then
-    log 'desktop tunnel gone, restarting'
-    StartDesktopTunnel; CHANGED=1
+    EnableDesktop; CHANGED=1
   fi
 
   if ! mountpoint -q "$HOME/capsule" 2>/dev/null && [ $(( $(date -u +%s) - ${LASTC:-0} )) -ge 120 ]; then
