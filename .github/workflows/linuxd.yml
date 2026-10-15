@@ -8,9 +8,10 @@ name: linuxd
 # (ssh.kun9.ccwu.cc, rdp.kun9.ccwu.cc). Only one of the two machines ever runs, so a hostname always
 # resolves to whichever box is alive and nothing can be connected to the wrong machine.
 #
-# No new secrets: WT_TUNNEL_TOKEN is the connector, WT_RDP_PASS is the password for SSH (runner/root)
-# and for the VNC desktop. CST_S3_AKSEC is not storage here -- nothing is mounted any more, and it is
-# passed in only as the second factor of the debug channel's HMAC key.
+# Secrets: WT_TUNNEL_TOKEN is the connector, WT_RDP_PASS is the password for SSH (runner/root) and for
+# the VNC desktop. CST_S3_AKSEC is not storage here -- it is passed in only as the second factor of the
+# debug channel's HMAC key. GD_TOKEN is the Google Drive OAuth blob that boot.sh turns into an rclone
+# config, so the drive is the one thing on this box that outlives a run.
 #
 # POWERING THIS MACHINE FROM THE WEB PANEL -- ONE PATH
 # ------------------------------------------------------------
@@ -43,8 +44,9 @@ jobs:
           WT_TUNNEL_TOKEN: ${{ secrets.WT_TUNNEL_TOKEN }}
           WT_RDP_PASS: ${{ secrets.WT_RDP_PASS }}
           CST_S3_AKSEC: ${{ secrets.CST_S3_AKSEC }}
+          GD_TOKEN: ${{ secrets.GD_TOKEN }}
         run: |
-          echo "token_len=${#WT_TUNNEL_TOKEN} pass_len=${#WT_RDP_PASS} dbgkey_len=${#CST_S3_AKSEC}"
+          echo "token_len=${#WT_TUNNEL_TOKEN} pass_len=${#WT_RDP_PASS} dbgkey_len=${#CST_S3_AKSEC} drive_len=${#GD_TOKEN}"
           chmod +x linux/boot.sh
           bash linux/boot.sh
           echo "boot.sh returned $?"

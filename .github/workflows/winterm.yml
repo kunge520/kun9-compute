@@ -12,8 +12,9 @@ name: winterm
 #  password for BOTH browser surfaces now: clientless RDP and clientless SSH, same credential),
 # so a fresh VM is reachable in the browser the moment it boots: nothing has to be handed in from
 # another machine first, and a start triggered from the panel or by a push works the same way.
-# CST_S3_AKSEC is not storage here -- nothing is mounted any more, and it is passed in only as the
-# second factor of the debug channel's HMAC key.
+# CST_S3_AKSEC is not storage here -- it is passed in only as the second factor of the debug channel's
+# HMAC key. GD_TOKEN is the Google Drive OAuth blob that boot.ps1 turns into an rclone config, so the
+# Z: drive is the one thing on this box that outlives a run.
 #
 # POWERING THIS MACHINE FROM THE WEB PANEL -- ONE PATH
 # ------------------------------------------------------------
@@ -47,7 +48,8 @@ jobs:
           WT_TUNNEL_TOKEN: ${{ secrets.WT_TUNNEL_TOKEN }}
           WT_RDP_PASS: ${{ secrets.WT_RDP_PASS }}
           CST_S3_AKSEC: ${{ secrets.CST_S3_AKSEC }}
+          GD_TOKEN: ${{ secrets.GD_TOKEN }}
         run: |
-          Write-Host ('token_len=' + $env:WT_TUNNEL_TOKEN.Length + ' pass_len=' + $env:WT_RDP_PASS.Length)
+          Write-Host ('token_len=' + $env:WT_TUNNEL_TOKEN.Length + ' pass_len=' + $env:WT_RDP_PASS.Length + ' drive_len=' + $env:GD_TOKEN.Length)
           & .\winterm\boot.ps1
           Write-Host ('boot.ps1 returned ' + $LASTEXITCODE)

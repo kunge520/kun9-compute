@@ -14,9 +14,10 @@
 # SSH terminal and for the VNC desktop. WT_TUNNEL_TOKEN is the named-connector token.
 # CST_S3_AKSEC is not storage here, only the second factor of the debug HMAC key below.
 #
-# Nothing is mounted. The 数据胶囊 FUSE mount was removed on 2026-10-16 -- the link to that bucket is
-# too slow from China to be usable as a disk. So the whole disk dies with the run and `git push` back
-# to this repo is the only way to keep a file; a shared drive comes later.
+# Google Drive is mounted at /root/drive (rclone + FUSE) and is the one thing here that survives a run.
+# It replaces the 数据胶囊, removed the day before because the link to that bucket is too slow from
+# China to be usable as a disk. Drive needs no bucket: a file written into /root/drive goes up to the
+# account and shows up in its web UI from any other machine.
 #
 # Desktop order matters for a different reason than it does on Windows: sshd and the tunnel come up
 # first and publish a heartbeat, so the machine is reachable inside a minute while apt is still
@@ -46,6 +47,10 @@ ENDS=$(date -u -d "+$SECS seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%
 RESTARTS=0
 NOTEG='ssh up'
 DESKG='not-installed'
+# The drive's state is probed from the mount table, never trusted from a variable: the mount runs as
+# root in a background job, so it cannot report back into this shell. See Probe().
+GDDIR=/root/drive
+GDG='pending'
 # autoconnect and resize are noVNC URL settings (app/ui.js reads them). The VNC password is NOT one of
 # them: this string is committed to linux/session.json in a public repo, and this same password is also
 # the SSH and panel credential. So the link is published clean and noVNC asks for it once per session --
@@ -162,6 +167,45 @@ StartDbgTunnel() {
   return 1
 }
 
+# ---- Google Drive: the box's durable disk ----
+# rclone comes from its own zip, not apt, so this never queues behind the desktop install's dpkg lock;
+# fuse3 is only fetched if the image happens not to have fusermount3.
+#
+# Root does the mounting, into /root/drive, because root is the account he signs in as and a FUSE mount
+# is readable by nobody but the user that created it unless /etc/fuse.conf grants allow_other. A
+# runner-owned mount would answer root's own `ls` with Permission denied, so the owner has to match.
+#
+# The token is GD_TOKEN, the OAuth blob from `rclone authorize "drive"`: rclone refreshes it itself,
+# with its own built-in client, and the refresh_token does not rotate -- which is what makes one baked
+# secret good for every boot.
+EnableDrive() {
+  local d="$HOME/cf" rc="$HOME/cf/rclone" m=/root/drive
+  mkdir -p "$d"
+  if [ -z "$GD_TOKEN" ]; then echo no-token >"$d/gd.diag"; return 1; fi
+  if [ ! -x "$rc" ]; then
+    curl -sL --max-time 180 -o "$d/rc.zip" https://downloads.rclone.org/rclone-current-linux-amd64.zip \
+      || { echo rclone-dl-fail >"$d/gd.diag"; return 1; }
+    (cd "$d" && unzip -oq rc.zip) || { echo rclone-unzip-fail >"$d/gd.diag"; return 1; }
+    f=$(find "$d" -name rclone -type f -perm -u+x | head -1)
+    [ -f "$f" ] && cp "$f" "$rc" && chmod +x "$rc" || { echo rclone-missing >"$d/gd.diag"; return 1; }
+  fi
+  command -v fusermount3 >/dev/null || sudo apt-get install -y -qq fuse3 >/dev/null 2>&1
+  command -v fusermount3 >/dev/null || { echo no-fuse >"$d/gd.diag"; return 1; }
+  printf '[gd]\ntype = drive\nscope = drive\ntoken = %s\n' "$GD_TOKEN" >"$d/gd.conf"
+  chmod 600 "$d/gd.conf"
+  sudo mkdir -p "$m"
+  sudo nohup "$rc" mount --config "$d/gd.conf" gd: "$m" --volname drive \
+    --vfs-cache-mode writes --dir-cache-time 30s --log-level INFO --log-file "$d/gd.log" \
+    >"$d/gd.out" 2>&1 &
+  local i
+  for i in $(seq 1 12); do
+    sleep 2
+    sudo mountpoint -q "$m" 2>/dev/null && { echo mounted >"$d/gd.diag"; log "drive mounted at $m"; return 0; }
+  done
+  echo mount-failed >"$d/gd.diag"
+  return 1
+}
+
 # ---- desktop: XFCE on a VNC display, drawn in the browser by noVNC ----
 # Why this is not RDP like the Windows box: Cloudflare's web RDP client is IronRDP, and with xrdp the
 # two never agree. xrdp 0.9.24 has no NLA, so IronRDP sends no Client Info credentials at all (sesman
@@ -226,9 +270,9 @@ SyncHead() {
 Publish() {
   local note="$1"
   local json
-  json=$(printf '{"alive":true,"machine":"linux","run_id":"%s","check":"%s","url":"%s","ssh_url":"https://ssh.kun9.ccwu.cc","user":"root","ttl_min":%s,"opened":"%s","ends":"%s","named":"%s","restarts":%s,"rdp_diag":"%s","rdp_info":"%s","ssh_info":"%s","dbg_url":"%s","dbg_diag":"%s","note":"%s"}' \
+  json=$(printf '{"alive":true,"machine":"linux","run_id":"%s","check":"%s","url":"%s","ssh_url":"https://ssh.kun9.ccwu.cc","user":"root","ttl_min":%s,"opened":"%s","ends":"%s","named":"%s","restarts":%s,"rdp_diag":"%s","rdp_info":"%s","ssh_info":"%s","drive":"%s","dbg_url":"%s","dbg_diag":"%s","note":"%s"}' \
     "$GITHUB_RUN_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DESKURL" "$MIN" "$OPENED" "$ENDS" "$CFPG" "$RESTARTS" \
-    "$DESKG" "vnc 127.0.0.1:$VNCPORT" "sshd 127.0.0.1:22 user=root" "$DBGURL" "$DBGPG" "$note")
+    "$DESKG" "vnc 127.0.0.1:$VNCPORT" "sshd 127.0.0.1:22 user=root" "$GDG" "$DBGURL" "$DBGPG" "$note")
   echo "LINUXD-JSON $json"
   local i
   for i in 1 2 3; do
@@ -254,12 +298,16 @@ log 'boot: tunnel'
 StartTunnel
 log 'boot: debug channel'
 StartDbgListener && StartDbgTunnel
-Publish 'booting: ssh+tunnel+dbg up, desktop installing'
+Publish 'booting: ssh+tunnel+dbg up, desktop and drive starting'
 
+# The drive and the desktop both take a minute, and neither is a dependency of the other: a failed
+# install leaves a working SSH box with a mounted disk, a failed disk leaves a working desktop.
+( EnableDrive; log "drive: $(cat "$HOME/cf/gd.diag" 2>/dev/null)" ) & GDJOB=$!
 ( EnableDesktop; log "desktop: $DESKG" ) & DESKJOB=$!
 # Bare `wait` would never return -- the tunnel and the debug listener are background jobs of this
 # same shell and run for the whole session, which would leave the machine up but unsupervised (no
-# heartbeat refresh, no panel stop). Wait on the install by pid.
+# heartbeat refresh, no panel stop). Wait on the two starters by pid.
+wait "$GDJOB"
 wait "$DESKJOB"
 
 # A background job cannot set a variable in its parent shell, so DESKG still holds whatever the
@@ -269,15 +317,20 @@ wait "$DESKJOB"
 Probe() {
   if curl -s --max-time 3 -o /dev/null "http://127.0.0.1:$WEBPORT/vnc.html"; then DESKG='listening'
   elif [ "$DESKG" = listening ]; then DESKG='not-listening'; fi
+  # A mount has an outside answer -- the mount table -- so it is never taken from the starter that
+  # ran it in a background job. That job only leaves its reason in a file, which is what GDG reads.
+  GDG=$(cat "$HOME/cf/gd.diag" 2>/dev/null || echo pending)
+  [ "$GDG" = mounted ] && { sudo mountpoint -q "$GDDIR" 2>/dev/null || GDG='unmounted'; }
 }
 Probe
 
-Publish "desktop=$DESKG dbg=$DBGPG"
-log "reachable: ssh root@ssh.kun9.ccwu.cc  desktop=${DESKURL:-none}  ttl=${MIN}m"
+Publish "desktop=$DESKG drive=$GDG dbg=$DBGPG"
+log "reachable: ssh root@ssh.kun9.ccwu.cc  desktop=${DESKURL:-none}  drive=$GDDIR  ttl=${MIN}m"
 
 # ---- supervise: keep the tunnel alive, obey the panel, refresh the heartbeat ----
 END_TS=$(date -u -d "+$SECS seconds" +%s 2>/dev/null || echo $(( $(date -u +%s) + SECS )))
 LASTP=0
+GDLAST=$(date -u +%s)
 while [ "$(date -u +%s)" -lt "$END_TS" ]; do
   sleep 20
   CHANGED=0
@@ -318,10 +371,19 @@ while [ "$(date -u +%s)" -lt "$END_TS" ]; do
     EnableDesktop; CHANGED=1
   fi
 
+  # Drive: a FUSE mount can stall or its rclone can be killed, and unlike the desktop nobody opens it
+  # by hand to notice. Retry on a timer, so a first boot that lost to a slow apt still ends up with
+  # the disk mounted.
+  if ! sudo mountpoint -q "$GDDIR" 2>/dev/null && [ $(( $(date -u +%s) - GDLAST )) -ge 120 ]; then
+    GDLAST=$(date -u +%s)
+    log 'drive not mounted, retrying'
+    EnableDrive; CHANGED=1
+  fi
+
   if [ $(( $(date -u +%s) - LASTP )) -ge 60 ] || [ "$CHANGED" = 1 ]; then
     LASTP=$(date -u +%s)
     Probe
-    Publish "desktop=$DESKG dbg=$DBGPG"
+    Publish "desktop=$DESKG drive=$GDG dbg=$DBGPG"
   fi
 done
 

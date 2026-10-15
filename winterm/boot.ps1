@@ -293,6 +293,83 @@ function Get-Binary([string]$url, [string]$out, [int]$minBytes) {
   }
   return $false
 }
+# ---- Google Drive: the owner's account mounted as Z: ----
+# Best-effort convenience, never a dependency: whatever happens here only shows up in the note the
+# panel reads, and the desktop still comes up. The mount is NOT started here -- a drive letter belongs
+# to the logon session that created it, and this job's session is never the desktop session, so what
+# worked in Test-Path was invisible on the desktop. It is installed as a logon task for the RDP account
+# instead, so the drive appears in the session that actually uses it.
+$script:GDARMED = $false
+$script:GDLAST = (Get-Date).AddDays(-1)
+$script:GDTASK = 'winterm-gdrive'
+function Get-GdDiag {
+  # A drive letter belongs to the logon session that created it, so a running rclone only counts when it
+  # runs in a desktop session: one in session 0 is healthy, invisible, and holds the letter the desktop
+  # needs. The process table is machine-wide, which is why the session id is checked here.
+  $p = @(Get-Process rclone -EA SilentlyContinue)
+  if (@($p | Where-Object { $_.SessionId -gt 0 }).Count -gt 0) { return 'mounted' }
+  if ($p.Count -gt 0) { return 'wrong-session' }
+  return 'armed'
+}
+function Start-DriveTask {
+  try { Get-Process rclone -EA SilentlyContinue | Where-Object { $_.SessionId -eq 0 } | Stop-Process -Force -EA SilentlyContinue } catch { }
+  try { & schtasks /run /tn $script:GDTASK 2>&1 | Out-Null } catch { }
+  for ($i = 0; $i -lt 5; $i++) {
+    Start-Sleep -Seconds 2
+    if ((Get-GdDiag) -eq 'mounted') { return 'mounted' }
+  }
+  return (Get-GdDiag)
+}
+
+function Enable-Drive {
+  if (-not "$env:GD_TOKEN") { return 'no-token' }
+  $t = Join-Path $env:ProgramData 'winterm'
+  if (-not (Test-Path $t)) { New-Item -ItemType Directory -Path $t -Force -EA SilentlyContinue | Out-Null }
+  $exe = Join-Path $t 'rclone.exe'
+  if (-not (Test-Path $exe)) {
+    if (-not (Get-Binary 'https://downloads.rclone.org/rclone-current-windows-amd64.zip' (Join-Path $t 'rc.zip') 5MB)) { return 'rclone-dl-fail' }
+    try { Expand-Archive (Join-Path $t 'rc.zip') -DestinationPath (Join-Path $t 'rcdir') -Force } catch { return 'rclone-unzip-fail' }
+    $f = (Get-ChildItem (Join-Path $t 'rcdir') -Recurse -Filter rclone.exe -EA SilentlyContinue | Select-Object -First 1)
+    if (-not $f) { return 'rclone-missing' }
+    Copy-Item $f.FullName $exe -Force
+  }
+  # WinFsp is the FUSE driver rclone mounts through; the MSI is idempotent, so no version probe.
+  $msi = Join-Path $t 'winfsp.msi'
+  if (-not (Test-Path $msi)) { Get-Binary 'https://github.com/winfsp/winfsp/releases/download/v2.0/winfsp-2.0.23075.msi' $msi 500KB | Out-Null }
+  if (Test-Path $msi) {
+    try { Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn', '/norestart') -Wait -PassThru | Out-Null } catch { }
+  } else { return 'winfsp-dl-fail' }
+  # One line, straight from the secret: rclone reads the OAuth blob as-is and refreshes it with its own
+  # built-in client, and the refresh_token does not rotate -- which is what makes one baked secret good
+  # for every boot.
+  $conf = Join-Path $t 'gd.conf'
+  $L = @('[gd]', 'type = drive', 'scope = drive', ('token = ' + "$env:GD_TOKEN".Trim()))
+  Set-Content -Path $conf -Value ($L -join "`r`n") -Encoding ascii
+  # Only the config file (which carries the token) is locked; the directory keeps inherited permissions
+  # so rclone.exe stays executable from any session. The interactive account is granted by name, not
+  # through BUILTIN\Administrators: a filtered UAC token keeps that group deny-only, so a group-only
+  # grant makes the config unreadable to exactly the session that has to mount it.
+  & icacls $conf /inheritance:r /grant 'administrator:F' /grant 'Administrators:F' /grant 'SYSTEM:F' /Q 2>&1 | Out-Null
+  $arg = '--config "' + $conf + '" mount gd: Z: --no-console --volname drive ' +
+    '--vfs-cache-mode writes --dir-cache-time 30s --log-level INFO --log-file "' + (Join-Path $t 'gd.log') + '"'
+  try {
+    $a = New-ScheduledTaskAction -Execute $exe -Argument $arg
+    $tr = New-ScheduledTaskTrigger -AtLogOn -User 'administrator'
+    $st = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+    $st.ExecutionTimeLimit = 'PT0S'
+    # -User without -Password registers "run whether logged on or not", which is a session-0 logon: the
+    # mount then works but its drive letter never reaches the desktop. Interactive is the whole point of
+    # the task, so the principal is spelled out. Limited, not Highest, is the part that took a day to
+    # find: elevating makes a *second* logon session inside the same terminal session, and a mount made
+    # there is visible to Test-Path from the task and invisible to Explorer -- same user, same session 1,
+    # different token.
+    $pr = New-ScheduledTaskPrincipal -UserId 'administrator' -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName $script:GDTASK -Action $a -Trigger $tr -Settings $st -Principal $pr -Force | Out-Null
+    $script:GDARMED = $true
+  } catch { return 'reg-fail: ' + $_.Exception.Message }
+  return (Start-DriveTask)
+}
+
 # ---- AI debug channel: a key-gated command echo on localhost, out through a quick tunnel ----
 # The browser terminal costs a second per keystroke and cannot paste, so a real bug takes an hour to
 # find. This is the same cloudflared already on the box pointed at a local listener instead: the debug
@@ -493,6 +570,14 @@ if ($script:DBGON) {
 $script:DBGLAST = Get-Date
 Publish @{ note = ('rdp ready, named=' + $NAMED + ' dbg=' + $DBGDIAG) }
 
+# The drive is the slow part of a boot -- a rclone zip and a WinFsp MSI -- so it comes after the
+# heartbeat above has already told the panel the box is up, not before it. What it reports at boot is
+# usually 'armed', which is correct and not a failure: the mount is a logon task, so Z: only exists
+# once someone connects the desktop.
+$script:GDDIAG = Enable-Drive
+Write-Host ('drive at boot: ' + $GDDIAG)
+Publish @{ drive = $script:GDDIAG; note = ('named=' + $NAMED + ' drive=' + $GDDIAG + ' dbg=' + $DBGDIAG) }
+
 # ---- supervise: keep the tunnel alive and obey the panel ----
 $until = (Get-Date).ToUniversalTime().AddSeconds($SECS)
 $lastPublish = Get-Date
@@ -535,6 +620,21 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
     $changed = $true
   }
 
+  if ($script:GDARMED) {
+    $script:GDDIAG = Get-GdDiag
+    # Only chase a missing mount while someone is actually logged on -- otherwise 'armed' is the honest
+    # state and the logon trigger does the work. The cooldown stops a failing mount from turning every
+    # poll into a heartbeat commit.
+    if ($script:GDDIAG -ne 'mounted' -and ((Get-Date) - $script:GDLAST).TotalSeconds -ge 60) {
+      if ((& query user 2>&1 | Out-String) -match 'Active') {
+        Write-Host 'drive mount gone, re-arming'
+        $script:GDLAST = Get-Date
+        $script:GDDIAG = Start-DriveTask
+        $changed = $true
+      }
+    }
+  }
+
   if ($script:DBGON -and ((Get-Date) - $script:DBGLAST).TotalSeconds -ge 60) {
     # The listener is a scheduled task and the tunnel is a process; either can die on its own and the
     # only symptom is my curl timing out, so both are checked on one slow cooldown.
@@ -557,7 +657,7 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
   }
 
   if ($changed -or ((Get-Date) - $lastPublish).TotalSeconds -ge 60) {
-    Publish @{ note = ('named=' + $NAMED + ' dbg=' + $script:DBGTUN) }
+    Publish @{ drive = $script:GDDIAG; note = ('named=' + $NAMED + ' drive=' + $script:GDDIAG + ' dbg=' + $script:DBGTUN) }
     $lastPublish = Get-Date
   }
 }
