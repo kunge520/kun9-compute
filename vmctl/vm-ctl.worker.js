@@ -445,7 +445,6 @@ async function status(env, m) {
       origin: mine ? String(s.ssh_info || '') : '',
       rdp: mine ? String(s.rdp_diag || '') : '',
       rdp_ip: mine ? String(s.rdp_ip || '') : '',
-      capsule: mine ? String(s.capsule || '') : '',
       ttl_min: s.ttl_min,
       closed: s.closed || '',
     };
@@ -673,8 +672,7 @@ function app() {
     "function say(m,bad){var e=$('msg');e.textContent=m||'';e.className='msg'+(bad?' err':'')}",
     // The box reports raw service states; the panel says one human thing about each and keeps the rest
     // inside 详细信息, which is where the exact values still show for anyone debugging a boot.
-    "var DIAG={listening:'已就绪',running:'已连接','not-installed':'未安装','not-listening':'已停止','no-listener':'监听进程掉了','no-tunnel-url':'拿不到网址',up:'已接通','no-pass':'缺少口令','no-capkey':'缺少密钥','not-armed':'未启用','not-mounted':'未挂载',down:'已停止',booting:'正在启动'};",
-    "function cap(s){s=String(s||'');return s.indexOf('mounted ')===0?('已挂载 '+s.slice(8)):(DIAG[s]||s)}",
+    "var DIAG={listening:'已就绪',running:'已连接','not-installed':'未安装','not-listening':'已停止','no-listener':'监听进程掉了','no-tunnel-url':'拿不到网址',up:'已接通','no-pass':'缺少口令','no-key':'缺少密钥',down:'已停止',booting:'正在启动'};",
     // One view, two machines. M is the selected machine and every call carries it. The SSH link is the
     // same for both boxes because they share the tunnel and the hostname; the desktop link is not --
     // Windows goes to the fixed Access RDP app, Linux to the noVNC URL it publishes each boot.
@@ -688,7 +686,7 @@ function app() {
     "'隧道握手完成后，桌面和终端就都通了'," +
     "'实测一分钟左右机器就通了，桌面再多半分钟'," +
     "'开机期间再按一次开机没有用，按钮会自己变灰'," +
-    "'这台机器每次开机都是全新的，重要文件记得先放进数据胶囊'," +
+    "'这台机器每次开机都是全新的，重要文件记得 push 回仓库保存'," +
     "'桌面和终端都是浏览器直连，不用装任何客户端'," +
     "'机器起来后按「打开桌面」或「打开终端」，浏览器会先让你过一次登录'," +
     "];",
@@ -723,7 +721,6 @@ function app() {
     " if(v.restarts)L.push('隧道重连：'+esc(v.restarts)+' 次');",
     " if(v.rdp)L.push('桌面：'+esc(DIAG[v.rdp]||v.rdp));",
     " if(v.origin)L.push('终端进程：'+esc(v.origin));",
-    " if(v.capsule)L.push('数据胶囊：'+esc(cap(v.capsule)));",
     " if(v.named)L.push('隧道：'+esc(DIAG[v.named]||v.named));",
     " if(r.error)L.push(esc(r.error));",
     " $('note').innerHTML=L.join('<br>');",

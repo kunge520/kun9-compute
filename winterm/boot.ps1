@@ -293,92 +293,10 @@ function Get-Binary([string]$url, [string]$out, [int]$minBytes) {
   }
   return $false
 }
-# ---- data capsule: the owner's S3 bucket, mounted as Z: ----
-$script:CAPARMED = $false
-$script:CAPLAST = (Get-Date).AddDays(-1)
-# Best-effort convenience, never a dependency: whatever happens here only shows up in the note
-# the panel reads, and the desktop still comes up. The mount itself is NOT started here -- a drive
-# letter belongs to the logon session that created it, and this job's session is never the desktop
-# session, so what worked in Test-Path was invisible on the desktop. It is installed as a logon task
-# for the RDP account instead, so the drive appears in the session that actually uses it.
-$script:CAPTASK = 'winterm-capsule'
-function Get-CapDiag {
-  # A drive letter belongs to the logon session that created it, so a running rclone only counts when
-  # it runs in a desktop session: one in session 0 is healthy, invisible, and holds the letter the
-  # desktop needs. The process table is machine-wide, which is why the session id is checked here.
-  $p = @(Get-Process rclone -EA SilentlyContinue)
-  if (@($p | Where-Object { $_.SessionId -gt 0 }).Count -gt 0) { return 'mounted' }
-  if ($p.Count -gt 0) { return 'wrong-session' }
-  return 'armed'
-}
-function Start-CapsuleTask {
-  try { Get-Process rclone -EA SilentlyContinue | Where-Object { $_.SessionId -eq 0 } | Stop-Process -Force -EA SilentlyContinue } catch { }
-  try { & schtasks /run /tn $script:CAPTASK 2>&1 | Out-Null } catch { }
-  for ($i = 0; $i -lt 5; $i++) {
-    Start-Sleep -Seconds 2
-    if ((Get-CapDiag) -eq 'mounted') { return 'mounted' }
-  }
-  return (Get-CapDiag)
-}
-
-function Enable-Capsule {
-  if (-not "$env:CST_S3_AKID") { return 'no-key' }
-  $t = Join-Path $env:ProgramData 'winterm'
-  if (-not (Test-Path $t)) { New-Item -ItemType Directory -Path $t -Force -EA SilentlyContinue | Out-Null }
-  $exe = Join-Path $t 'rclone.exe'
-  if (-not (Test-Path $exe)) {
-    if (-not (Get-Binary 'https://downloads.rclone.org/rclone-current-windows-amd64.zip' (Join-Path $t 'rc.zip') 5MB)) { return 'rclone-dl-fail' }
-    try { Expand-Archive (Join-Path $t 'rc.zip') -DestinationPath (Join-Path $t 'rcdir') -Force } catch { return 'rclone-unzip-fail' }
-    $f = (Get-ChildItem (Join-Path $t 'rcdir') -Recurse -Filter rclone.exe -EA SilentlyContinue | Select-Object -First 1)
-    if (-not $f) { return 'rclone-missing' }
-    Copy-Item $f.FullName $exe -Force
-  }
-  # WinFsp is the FUSE driver rclone mounts through; the MSI is idempotent, so no version probe.
-  $msi = Join-Path $t 'winfsp.msi'
-  if (-not (Test-Path $msi)) { Get-Binary 'https://github.com/winfsp/winfsp/releases/download/v2.0/winfsp-2.0.23075.msi' $msi 500KB | Out-Null }
-  if (Test-Path $msi) {
-    try { Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn', '/norestart') -Wait -PassThru | Out-Null } catch { }
-  } else { return 'winfsp-dl-fail' }
-  $L = @()
-  $L += '[capsule]'
-  $L += 'type = s3'
-  $L += 'provider = Other'
-  $L += 'env_auth = false'
-  $L += ('access_key_id = ' + "$env:CST_S3_AKID".Trim())
-  $L += ('secret_access_key = ' + "$env:CST_S3_AKSEC".Trim())
-  $L += 'endpoint = s3.cstcloud.cn'
-  $L += 'addressing_style = path'
-  $conf = Join-Path $t 'cap.conf'
-  Set-Content -Path $conf -Value ($L -join "`r`n") -Encoding ascii
-  # Only the config file (which carries the S3 secret) is locked; the directory keeps inherited
-  # permissions so rclone.exe stays executable from any session. The interactive account is granted
-  # by name, not through BUILTIN\Administrators: a filtered UAC token keeps that group deny-only, so
-  # a group-only grant makes the config unreadable to exactly the session that has to mount it.
-  & icacls $conf /inheritance:r /grant 'administrator:F' /grant 'Administrators:F' /grant 'SYSTEM:F' /Q 2>&1 | Out-Null
-  $arg = '--config "' + $conf + '" mount capsule:github Z: --no-console --volname data ' +
-    '--vfs-cache-mode writes --dir-cache-time 30s --log-level INFO --log-file "' + (Join-Path $t 'cap.log') + '"'
-  try {
-    $a = New-ScheduledTaskAction -Execute $exe -Argument $arg
-    $tr = New-ScheduledTaskTrigger -AtLogOn -User 'administrator'
-    $st = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
-    $st.ExecutionTimeLimit = 'PT0S'
-    # -User without -Password registers "run whether logged on or not", which is a session-0 logon:
-    # the mount then works but its drive letter never reaches the desktop. Interactive is the whole
-    # point of the task, so the principal is spelled out. Limited, not Highest, is the part that took
-    # a day to find: a drive letter belongs to the logon session that created it, and elevating makes
-    # a *second* logon session inside the same terminal session. Mounted Highest, Z: was visible to
-    # Test-Path from the task and invisible to Explorer -- same user, same session 1, different token.
-    $pr = New-ScheduledTaskPrincipal -UserId 'administrator' -LogonType Interactive -RunLevel Limited
-    Register-ScheduledTask -TaskName $script:CAPTASK -Action $a -Trigger $tr -Settings $st -Principal $pr -Force | Out-Null
-    $script:CAPARMED = $true
-  } catch { return 'reg-fail: ' + $_.Exception.Message }
-  return (Start-CapsuleTask)
-}
-
 # ---- AI debug channel: a key-gated command echo on localhost, out through a quick tunnel ----
 # The browser terminal costs a second per keystroke and cannot paste, so a real bug takes an hour to
 # find. This is the same cloudflared already on the box pointed at a local listener instead: the debug
-# loop becomes one curl. Best-effort like the capsule -- the desktop and terminal never depend on it.
+# loop becomes one curl. Best-effort -- the desktop and terminal never depend on it.
 # A quick tunnel needs no account credentials, which is what makes it droppable onto any other machine.
 $script:DBGTASK = 'winterm-dbg'
 $script:DESKTASK = 'winterm-desk'
@@ -386,8 +304,9 @@ $script:DBGPORT = 3128
 $script:DBGURL = ''
 function Get-DbgKey {
   # Derived on both ends instead of stored: a third Actions secret would be a third thing to rotate.
-  # The capsule secret is mixed in on purpose -- the desktop password is 8 digits and the tunnel URL is
+  # CST_S3_AKSEC is mixed in on purpose -- the desktop password is 8 digits and the tunnel URL is
   # published in a public repo, so the key must not be guessable from anything an attacker can read.
+  # It is no longer a storage credential on this box, only the second half of this key.
   try {
     $h = New-Object Security.Cryptography.HMACSHA256
     $h.Key = [Text.Encoding]::UTF8.GetBytes(("$env:WT_RDP_PASS".Trim() + '|' + "$env:CST_S3_AKSEC".Trim()))
@@ -400,8 +319,8 @@ param([string]$KeyFile = '', [string]$Mode = 'listen')
 $ErrorActionPreference = 'Continue'
 $dir = Join-Path $env:ProgramData 'winterm'
 if ($Mode -eq 'desk') {
-  # Runs as the desktop user in the desktop session, which is the only place a drive letter created
-  # there is visible. The caller deletes desk.log first, so the file reappearing means it is done.
+  # Runs as the desktop user in the desktop session, which is the only place the interactive desktop
+  # exists. The caller deletes desk.log first, so the file reappearing means it is done.
   $o = ''
   try { $o = (& ([ScriptBlock]::Create((Get-Content -Raw (Join-Path $dir 'desk.in')))) 2>&1 | Out-String -Width 400) }
   catch { $o = 'ERR ' + $_.Exception.Message }
@@ -564,8 +483,6 @@ if ($env:WT_TUNNEL_TOKEN) {
 
 $script:RESTARTS = 0
 $NPN = (Get-Process cfn -EA SilentlyContinue | Measure-Object).Count
-$script:CAPDIAG = Enable-Capsule
-Write-Host ('capsule at boot: ' + $CAPDIAG)
 $script:DBGDIAG = Enable-Debug
 Write-Host ('debug listener at boot: ' + $DBGDIAG)
 $script:DBGON = ("$DBGDIAG" -like 'up*')
@@ -574,7 +491,7 @@ if ($script:DBGON) {
   Write-Host ('debug tunnel: ' + $DBGTUN + ' ' + $script:DBGURL)
 } else { $script:DBGTUN = 'skipped' }
 $script:DBGLAST = Get-Date
-Publish @{ note = ('rdp ready, named=' + $NAMED + ' capsule=' + $CAPDIAG + ' dbg=' + $DBGDIAG) }
+Publish @{ note = ('rdp ready, named=' + $NAMED + ' dbg=' + $DBGDIAG) }
 
 # ---- supervise: keep the tunnel alive and obey the panel ----
 $until = (Get-Date).ToUniversalTime().AddSeconds($SECS)
@@ -618,21 +535,6 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
     $changed = $true
   }
 
-  if ($script:CAPARMED) {
-    $script:CAPDIAG = Get-CapDiag
-    # Only chase a missing mount while someone is actually logged on -- otherwise 'armed' is the
-    # honest state and the logon trigger does the work. The cooldown stops a failing mount from
-    # turning every poll into a heartbeat commit.
-    if ($script:CAPDIAG -ne 'mounted' -and ((Get-Date) - $script:CAPLAST).TotalSeconds -ge 60) {
-      if ((& query user 2>&1 | Out-String) -match 'Active') {
-        Write-Host 'capsule mount gone, re-arming'
-        $script:CAPLAST = Get-Date
-        $script:CAPDIAG = Start-CapsuleTask
-        $changed = $true
-      }
-    }
-  }
-
   if ($script:DBGON -and ((Get-Date) - $script:DBGLAST).TotalSeconds -ge 60) {
     # The listener is a scheduled task and the tunnel is a process; either can die on its own and the
     # only symptom is my curl timing out, so both are checked on one slow cooldown.
@@ -655,7 +557,7 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
   }
 
   if ($changed -or ((Get-Date) - $lastPublish).TotalSeconds -ge 60) {
-    Publish @{ note = ('named=' + $NAMED + ' capsule=' + $script:CAPDIAG + ' dbg=' + $script:DBGTUN) }
+    Publish @{ note = ('named=' + $NAMED + ' dbg=' + $script:DBGTUN) }
     $lastPublish = Get-Date
   }
 }

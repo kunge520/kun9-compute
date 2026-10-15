@@ -12,6 +12,8 @@ name: winterm
 #  password for BOTH browser surfaces now: clientless RDP and clientless SSH, same credential),
 # so a fresh VM is reachable in the browser the moment it boots: nothing has to be handed in from
 # another machine first, and a start triggered from the panel or by a push works the same way.
+# CST_S3_AKSEC is not storage here -- nothing is mounted any more, and it is passed in only as the
+# second factor of the debug channel's HMAC key.
 #
 # POWERING THIS MACHINE FROM THE WEB PANEL -- ONE PATH
 # ------------------------------------------------------------
@@ -44,7 +46,6 @@ jobs:
         env:
           WT_TUNNEL_TOKEN: ${{ secrets.WT_TUNNEL_TOKEN }}
           WT_RDP_PASS: ${{ secrets.WT_RDP_PASS }}
-          CST_S3_AKID: ${{ secrets.CST_S3_AKID }}
           CST_S3_AKSEC: ${{ secrets.CST_S3_AKSEC }}
         run: |
           Write-Host ('token_len=' + $env:WT_TUNNEL_TOKEN.Length + ' pass_len=' + $env:WT_RDP_PASS.Length)

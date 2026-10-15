@@ -9,7 +9,8 @@ name: linuxd
 # resolves to whichever box is alive and nothing can be connected to the wrong machine.
 #
 # No new secrets: WT_TUNNEL_TOKEN is the connector, WT_RDP_PASS is the password for SSH (runner/root)
-# and for the RDP desktop, CST_S3_* mount the capsule's github bucket under ~/capsule.
+# and for the VNC desktop. CST_S3_AKSEC is not storage here -- nothing is mounted any more, and it is
+# passed in only as the second factor of the debug channel's HMAC key.
 #
 # POWERING THIS MACHINE FROM THE WEB PANEL -- ONE PATH
 # ------------------------------------------------------------
@@ -41,10 +42,9 @@ jobs:
         env:
           WT_TUNNEL_TOKEN: ${{ secrets.WT_TUNNEL_TOKEN }}
           WT_RDP_PASS: ${{ secrets.WT_RDP_PASS }}
-          CST_S3_AKID: ${{ secrets.CST_S3_AKID }}
           CST_S3_AKSEC: ${{ secrets.CST_S3_AKSEC }}
         run: |
-          echo "token_len=${#WT_TUNNEL_TOKEN} pass_len=${#WT_RDP_PASS} cap_len=${#CST_S3_AKID}"
+          echo "token_len=${#WT_TUNNEL_TOKEN} pass_len=${#WT_RDP_PASS} dbgkey_len=${#CST_S3_AKSEC}"
           chmod +x linux/boot.sh
           bash linux/boot.sh
           echo "boot.sh returned $?"

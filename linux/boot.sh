@@ -12,7 +12,11 @@
 #
 # Everything is one credential: WT_RDP_PASS is the password for ssh (runner/root), for the browser
 # SSH terminal and for the VNC desktop. WT_TUNNEL_TOKEN is the named-connector token.
-# CST_S3_AKID/CST_S3_AKSEC mount the capsule's `github` bucket, the Windows box's Z: under ~.
+# CST_S3_AKSEC is not storage here, only the second factor of the debug HMAC key below.
+#
+# Nothing is mounted. The 数据胶囊 FUSE mount was removed on 2026-10-16 -- the link to that bucket is
+# too slow from China to be usable as a disk. So the whole disk dies with the run and `git push` back
+# to this repo is the only way to keep a file; a shared drive comes later.
 #
 # Desktop order matters for a different reason than it does on Windows: sshd and the tunnel come up
 # first and publish a heartbeat, so the machine is reachable inside a minute while apt is still
@@ -47,7 +51,6 @@ DESKG='not-installed'
 # the SSH and panel credential. So the link is published clean and noVNC asks for it once per session --
 # behind the Access login, which is what actually keeps strangers out.
 DESKURL='https://vnc.kun9.ccwu.cc/vnc.html?autoconnect=true&resize=scale'
-CAPG='not-armed'
 CFPG='down'
 DBGURL=''
 DBGPG='down'
@@ -105,13 +108,13 @@ StartTunnel() {
 # ---- debug channel: key-gated command echo out through a quick tunnel ----
 # Same shape as winterm's so the existing dbg.cjs works unchanged: POST /run (and /desk, which on
 # Linux is the same user, so it only differs in what it reports) with the body as a bash script and
-# X-Key = HMAC-SHA256(WT_RDP_PASS|<capsule secret_access_key>, "kun9-dbg-v1") -- the two values the VM
+# X-Key = HMAC-SHA256(WT_RDP_PASS|CST_S3_AKSEC, "kun9-dbg-v1") -- the two values the VM
 # already holds as secrets, so no third credential is introduced. A quick tunnel needs no account
 # permissions at all, which is what makes this droppable on any machine; its random URL goes into the
 # heartbeat, exactly like the Windows box publishes dbg_url.
 StartDbgListener() {
   [ -z "$WT_RDP_PASS" ] && { DBGPG='no-pass'; return 1; }
-  [ -z "$CST_S3_AKSEC" ] && { DBGPG='no-capkey'; return 1; }
+  [ -z "$CST_S3_AKSEC" ] && { DBGPG='no-key'; return 1; }
   nohup python3 - "$WT_RDP_PASS" "$CST_S3_AKSEC" "$DBGPORT" <<'PY' >"$HOME/cf/dbg.log" 2>&1 &
 import hmac, hashlib, subprocess, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -178,8 +181,8 @@ EnableDesktop() {
       dbus-x11 fonts-wqy-microhei tigervnc-standalone-server tigervnc-common tigervnc-tools \
       novnc websockify || { DESKG='apt-fail'; return 1; }
   fi
-  # Root owns the display, because root is the account he logs in as and the capsule has to show up in
-  # its 文件管理器. /run/user/0 does not exist on a runner and xfce4 complains without it.
+  # Root owns the display because root is the account he logs in as, and a desktop run by anyone else
+  # would show him a different home. /run/user/0 does not exist on a runner and xfce4 complains without it.
   sudo mkdir -p /root/.vnc /run/user/0
   sudo chmod 700 /run/user/0
   # vncpasswd is the only writer of that file's odd 8-byte DES form, so the one credential everything
@@ -211,43 +214,6 @@ EnableDesktop() {
   return 1
 }
 
-# ---- data capsule: the owner's S3 bucket, mounted under ~/capsule ----
-EnableCapsule() {
-  [ -z "$CST_S3_AKID" ] && { CAPG='no-key'; return 1; }
-  local d="$HOME/capsule"
-  mkdir -p "$d"
-  if [ ! -x "$HOME/cf/rclone" ]; then
-    curl -sL --max-time 180 -o "$HOME/cf/rc.zip" https://downloads.rclone.org/rclone-current-linux-amd64.zip || { CAPG='rclone-dl-fail'; return 1; }
-    (cd "$HOME/cf" && unzip -oq rc.zip) || { CAPG='rclone-unzip-fail'; return 1; }
-    f=$(find "$HOME/cf" -name rclone -type f -perm -u+x | head -1)
-    [ -f "$f" ] && cp "$f" "$HOME/cf/rclone" && chmod +x "$HOME/cf/rclone" || { CAPG='rclone-missing'; return 1; }
-  fi
-  command -v fusermount3 >/dev/null || sudo apt-get install -y -qq fuse3 >/dev/null 2>&1
-  # provider=Other + path addressing: virtual-host style fails DNS on github.s3.cstcloud.cn.
-  { printf '[capsule]\ntype = s3\nprovider = Other\nenv_auth = false\n'
-    printf 'access_key_id = %s\n' "$CST_S3_AKID"
-    printf 'secret_access_key = %s\n' "$CST_S3_AKSEC"
-    printf 'endpoint = s3.cstcloud.cn\naddressing_style = path\n'; } >"$HOME/cf/cap.conf"
-  chmod 600 "$HOME/cf/cap.conf"
-  # Still mounted by runner (the S3 keys and the cache live in that home), but the desktop session
-  # logs in as root, and a plain FUSE mount is closed to every other uid including root -- hence
-  # allow_other through fuse.conf, plus a link so 文件管理器 shows it as ~/capsule either way.
-  sudo sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf
-  grep -q '^user_allow_other' /etc/fuse.conf || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
-  nohup "$HOME/cf/rclone" mount --config "$HOME/cf/cap.conf" capsule:github "$d" \
-    --volname capsule --vfs-cache-mode writes --dir-cache-time 30s --allow-other \
-    --log-level INFO --log-file "$HOME/cf/cap.log" >"$HOME/cf/cap.out" 2>&1 &
-  for _ in $(seq 1 12); do
-    sleep 2
-    mountpoint -q "$d" 2>/dev/null && {
-      CAPG="mounted $d"; log "capsule mounted at $d"
-      sudo ln -sfn "$d" /root/capsule 2>/dev/null
-      return 0; }
-  done
-  CAPG='mount-failed'
-  return 1
-}
-
 # ---- heartbeat: same file shape the panel already reads for winterm ----
 SyncHead() {
   git rebase --quit >/dev/null 2>&1
@@ -260,9 +226,9 @@ SyncHead() {
 Publish() {
   local note="$1"
   local json
-  json=$(printf '{"alive":true,"machine":"linux","run_id":"%s","check":"%s","url":"%s","ssh_url":"https://ssh.kun9.ccwu.cc","user":"root","ttl_min":%s,"opened":"%s","ends":"%s","named":"%s","restarts":%s,"rdp_diag":"%s","rdp_info":"%s","ssh_info":"%s","capsule":"%s","dbg_url":"%s","dbg_diag":"%s","note":"%s"}' \
+  json=$(printf '{"alive":true,"machine":"linux","run_id":"%s","check":"%s","url":"%s","ssh_url":"https://ssh.kun9.ccwu.cc","user":"root","ttl_min":%s,"opened":"%s","ends":"%s","named":"%s","restarts":%s,"rdp_diag":"%s","rdp_info":"%s","ssh_info":"%s","dbg_url":"%s","dbg_diag":"%s","note":"%s"}' \
     "$GITHUB_RUN_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DESKURL" "$MIN" "$OPENED" "$ENDS" "$CFPG" "$RESTARTS" \
-    "$DESKG" "vnc 127.0.0.1:$VNCPORT" "sshd 127.0.0.1:22 user=root" "$CAPG" "$DBGURL" "$DBGPG" "$note")
+    "$DESKG" "vnc 127.0.0.1:$VNCPORT" "sshd 127.0.0.1:22 user=root" "$DBGURL" "$DBGPG" "$note")
   echo "LINUXD-JSON $json"
   local i
   for i in 1 2 3; do
@@ -291,25 +257,22 @@ StartDbgListener && StartDbgTunnel
 Publish 'booting: ssh+tunnel+dbg up, desktop installing'
 
 ( EnableDesktop; log "desktop: $DESKG" ) & DESKJOB=$!
-( sleep 1; EnableCapsule; log "capsule: $CAPG" ) & CAPJOB=$!
 # Bare `wait` would never return -- the tunnel and the debug listener are background jobs of this
 # same shell and run for the whole session, which would leave the machine up but unsupervised (no
-# heartbeat refresh, no panel stop). Wait on the two installs by pid.
-wait "$DESKJOB"; wait "$CAPJOB"
+# heartbeat refresh, no panel stop). Wait on the install by pid.
+wait "$DESKJOB"
 
-# A background job cannot set a variable in its parent shell, so DESKG/CAPG still hold their initial
-# values no matter what the installs did. Read the truth back from the system instead: the local page
-# for the desktop, the mount table for the capsule. A diagnosis that came from the install itself
-# (apt-fail, no-key, rclone-missing) is kept: only the never-ran/stale states get rewritten.
+# A background job cannot set a variable in its parent shell, so DESKG still holds whatever the
+# install left in it. Read the truth back from the system instead: the local page needs Xvnc, xfce
+# and websockify all at once. A diagnosis that came from the install itself (apt-fail) is kept:
+# only the never-ran/stale states get rewritten.
 Probe() {
   if curl -s --max-time 3 -o /dev/null "http://127.0.0.1:$WEBPORT/vnc.html"; then DESKG='listening'
   elif [ "$DESKG" = listening ]; then DESKG='not-listening'; fi
-  if mountpoint -q "$HOME/capsule" 2>/dev/null; then CAPG="mounted $HOME/capsule"
-  elif [ "$CAPG" = not-armed ] || [ "$CAPG" = "mounted $HOME/capsule" ]; then CAPG='not-mounted'; fi
 }
 Probe
 
-Publish "desktop=$DESKG capsule=$CAPG dbg=$DBGPG"
+Publish "desktop=$DESKG dbg=$DBGPG"
 log "reachable: ssh root@ssh.kun9.ccwu.cc  desktop=${DESKURL:-none}  ttl=${MIN}m"
 
 # ---- supervise: keep the tunnel alive, obey the panel, refresh the heartbeat ----
@@ -355,14 +318,10 @@ while [ "$(date -u +%s)" -lt "$END_TS" ]; do
     EnableDesktop; CHANGED=1
   fi
 
-  if ! mountpoint -q "$HOME/capsule" 2>/dev/null && [ $(( $(date -u +%s) - ${LASTC:-0} )) -ge 120 ]; then
-    LASTC=$(date -u +%s); EnableCapsule; CHANGED=1
-  fi
-
   if [ $(( $(date -u +%s) - LASTP )) -ge 60 ] || [ "$CHANGED" = 1 ]; then
     LASTP=$(date -u +%s)
     Probe
-    Publish "desktop=$DESKG capsule=$CAPG dbg=$DBGPG"
+    Publish "desktop=$DESKG dbg=$DBGPG"
   fi
 done
 
