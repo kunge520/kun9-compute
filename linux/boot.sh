@@ -205,9 +205,11 @@ EnableDesktop() {
   return 1
 }
 
-# The desktop link is published in the heartbeat, so the random host is his problem never to remember:
-# 打开桌面 on the panel reads it straight from there. autoconnect+password are both noVNC URL settings
-# (app/ui.js reads them), which makes the click land on the desktop with nothing typed.
+# The link is built in one place because the desktop is installed in a background job: the parent
+# shell has to be able to rebuild it from the tunnel's log. autoconnect+password are both noVNC URL
+# settings (app/ui.js reads them), so the click lands on the desktop with nothing typed.
+DeskLink() { printf '%s/vnc.html?autoconnect=true&resize=scale&password=%s' "$1" "$WT_RDP_PASS"; }
+
 StartDesktopTunnel() {
   local d="$HOME/cf" u i
   rm -f "$d/dt.log"
@@ -216,9 +218,7 @@ StartDesktopTunnel() {
   for i in $(seq 1 20); do
     sleep 2
     u=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$d/dt.log" 2>/dev/null | head -1)
-    [ -n "$u" ] && {
-      DESKURL="$u/vnc.html?autoconnect=true&resize=scale&password=$WT_RDP_PASS"
-      DESKG='listening'; log "desktop at $u"; return 0; }
+    [ -n "$u" ] && { DESKURL=$(DeskLink "$u"); DESKG='listening'; log "desktop at $u"; return 0; }
   done
   DESKG='no-tunnel-url'
   return 1
@@ -310,12 +310,18 @@ Publish 'booting: ssh+tunnel+dbg up, desktop installing'
 # heartbeat refresh, no panel stop). Wait on the two installs by pid.
 wait "$DESKJOB"; wait "$CAPJOB"
 
-# A background job cannot set a variable in its parent shell, so DESKG/CAPG still hold their initial
-# values no matter what the installs did. Read the truth back from the system instead. A diagnosis
-# that came from the install itself (apt-fail, no-key, rclone-missing) is kept -- only the two
-# never-ran/stale-mounted states get rewritten.
+# A background job cannot set a variable in its parent shell, so DESKG/DESKURL/CAPG still hold their
+# initial values no matter what the installs did. Read the truth back from the system instead -- the
+# tunnel's own log gives the link, the local page gives the state, the mount table gives the capsule.
+# A diagnosis that came from the install itself (apt-fail, no-key, rclone-missing) is kept: only the
+# never-ran/stale states get rewritten.
 Probe() {
-  if curl -s --max-time 3 -o /dev/null "http://127.0.0.1:$WEBPORT/vnc.html" && [ -n "$DESKURL" ]; then
+  local u
+  if [ -z "$DESKURL" ]; then
+    u=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$HOME/cf/dt.log" 2>/dev/null | head -1)
+    [ -n "$u" ] && DESKURL=$(DeskLink "$u")
+  fi
+  if [ -n "$DESKURL" ] && curl -s --max-time 3 -o /dev/null "http://127.0.0.1:$WEBPORT/vnc.html"; then
     DESKG='listening'
   elif [ "$DESKG" = listening ]; then DESKG='not-listening'; fi
   if mountpoint -q "$HOME/capsule" 2>/dev/null; then CAPG="mounted $HOME/capsule"
