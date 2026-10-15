@@ -42,9 +42,11 @@ ENDS=$(date -u -d "+$SECS seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%
 RESTARTS=0
 NOTEG='ssh up'
 DESKG='not-installed'
-# autoconnect and password are both noVNC URL settings (app/ui.js reads them), so one click lands on
-# the desktop with nothing typed. Fixed because the hostname is fixed: nothing here is learned at boot.
-DESKURL="https://vnc.kun9.ccwu.cc/vnc.html?autoconnect=true&resize=scale&password=$WT_RDP_PASS"
+# autoconnect and resize are noVNC URL settings (app/ui.js reads them). The VNC password is NOT one of
+# them: this string is committed to linux/session.json in a public repo, and this same password is also
+# the SSH and panel credential. So the link is published clean and noVNC asks for it once per session --
+# behind the Access login, which is what actually keeps strangers out.
+DESKURL='https://vnc.kun9.ccwu.cc/vnc.html?autoconnect=true&resize=scale'
 CAPG='not-armed'
 CFPG='down'
 DBGURL=''
