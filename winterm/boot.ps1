@@ -351,8 +351,10 @@ function Enable-Capsule {
   $conf = Join-Path $t 'cap.conf'
   Set-Content -Path $conf -Value ($L -join "`r`n") -Encoding ascii
   # Only the config file (which carries the S3 secret) is locked; the directory keeps inherited
-  # permissions so rclone.exe stays executable from any session.
-  & icacls $conf /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' /Q 2>&1 | Out-Null
+  # permissions so rclone.exe stays executable from any session. The interactive account is granted
+  # by name, not through BUILTIN\Administrators: a filtered UAC token keeps that group deny-only, so
+  # a group-only grant makes the config unreadable to exactly the session that has to mount it.
+  & icacls $conf /inheritance:r /grant 'administrator:F' /grant 'Administrators:F' /grant 'SYSTEM:F' /Q 2>&1 | Out-Null
   $arg = '--config "' + $conf + '" mount capsule:github Z: --no-console --volname data ' +
     '--vfs-cache-mode writes --dir-cache-time 30s --log-level INFO --log-file "' + (Join-Path $t 'cap.log') + '"'
   try {
@@ -362,8 +364,11 @@ function Enable-Capsule {
     $st.ExecutionTimeLimit = 'PT0S'
     # -User without -Password registers "run whether logged on or not", which is a session-0 logon:
     # the mount then works but its drive letter never reaches the desktop. Interactive is the whole
-    # point of the task, so the principal is spelled out.
-    $pr = New-ScheduledTaskPrincipal -UserId 'administrator' -LogonType Interactive -RunLevel Highest
+    # point of the task, so the principal is spelled out. Limited, not Highest, is the part that took
+    # a day to find: a drive letter belongs to the logon session that created it, and elevating makes
+    # a *second* logon session inside the same terminal session. Mounted Highest, Z: was visible to
+    # Test-Path from the task and invisible to Explorer -- same user, same session 1, different token.
+    $pr = New-ScheduledTaskPrincipal -UserId 'administrator' -LogonType Interactive -RunLevel Limited
     Register-ScheduledTask -TaskName $script:CAPTASK -Action $a -Trigger $tr -Settings $st -Principal $pr -Force | Out-Null
     $script:CAPARMED = $true
   } catch { return 'reg-fail: ' + $_.Exception.Message }
@@ -464,13 +469,22 @@ function Enable-Debug {
   Set-Content -Path $ps -Value $script:DBGPS -Encoding ascii
   $st = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
   $st.ExecutionTimeLimit = 'PT0S'
+  # The desk runner needs Parallel: Task Scheduler counts the whole child process tree, so one command
+  # that leaves something running (a mount, a tunnel) would otherwise hold the instance open forever
+  # and IgnoreNew would wedge every later /desk call.
+  $st2 = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances Parallel
+  $st2.ExecutionTimeLimit = 'PT12H'
   try {
     $a1 = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $ps + '" -KeyFile "' + $kf + '"')
     $p1 = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     Register-ScheduledTask -TaskName $script:DBGTASK -Action $a1 -Trigger (New-ScheduledTaskTrigger -AtStartup) -Settings $st -Principal $p1 -Force | Out-Null
     $a2 = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $ps + '" -Mode desk')
-    $p2 = New-ScheduledTaskPrincipal -UserId 'administrator' -LogonType Interactive -RunLevel Highest
-    Register-ScheduledTask -TaskName $script:DESKTASK -Action $a2 -Trigger (New-ScheduledTaskTrigger -AtLogOn -User 'administrator') -Settings $st -Principal $p2 -Force | Out-Null
+    # Limited on purpose. /desk answers "what does the desktop see", and an elevated runner answers
+    # that with a drive-letter namespace Explorer does not have -- which is how a working mount got
+    # reported as mounted for hours while the user kept saying the disk was not there. Privileged
+    # machine work belongs on /run, which is SYSTEM anyway.
+    $p2 = New-ScheduledTaskPrincipal -UserId 'administrator' -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName $script:DESKTASK -Action $a2 -Trigger (New-ScheduledTaskTrigger -AtLogOn -User 'administrator') -Settings $st2 -Principal $p2 -Force | Out-Null
     & schtasks /run /tn $script:DBGTASK 2>&1 | Out-Null
   } catch { return 'reg-fail: ' + $_.Exception.Message }
   for ($i = 0; $i -lt 10; $i++) {
