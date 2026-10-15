@@ -25,7 +25,6 @@ const MACH = {
 const KEYS = ['win', 'linux'];
 // Default win: winterm.yml polls these endpoints with no machine parameter and must not change.
 const pick = (x) => (String(x || '').toLowerCase() === 'linux' ? MACH.linux : MACH.win);
-const rawOf = (m) => 'https://raw.githubusercontent.com/' + REPO + '/main/' + m.path;
 const runsOf = (m) => '/repos/' + REPO + '/actions/workflows/' + m.wf + '/runs?per_page=3';
 const COOKIE = 'vmctl';
 // Browser RDP/SSH are only served to a request Access already trusts, and the only trust this kit can
@@ -237,7 +236,7 @@ export default {
         // Desktop repair on a live machine: redo the listener setup and report what the connector
         // can actually reach, without a reboot. Only a running machine has a console worth fixing.
         const live = await runs(env, m);
-        const s = await session(false, m);
+        const s = await session(env, m);
         if (!(live && live.live) && !(s && s.alive === true && fresh(s.check, 180))) {
           return send(JSON.stringify({ ok: false, note: '机器没开着，桌面没什么可修的' }), 'application/json', 409);
         }
@@ -260,12 +259,13 @@ export default {
           ok: false,
           note: '即时触发失败：' + ((r.status === 401 || r.status === 403) ? 'GitHub 不认这个令牌，去 /token 重贴一个' : (r.note || r.status)),
         }), 'application/json', 502);
-        // The flag holds busy() across the whole bring-up -- the runner handover, then the Linux box's
-        // 5-8 minutes of apt -- and the machine's first /api/power poll is what clears it.
+        // The flag holds busy() across the bring-up and the machine's first /api/power poll clears it;
+        // 1200 s is slack for a runner that dies during setup, not an expected wait.
         await env.STORE.put(m.bt, '1', { expirationTtl: 1200 });
-        // The Linux box pulls xfce4 + Xvnc/noVNC through apt on every boot, so its honest estimate is
-        // longer than the Windows one -- a wrong ETA reads as a hung machine.
-        return send(JSON.stringify({ ok: true, note: '已触发，再等 ' + (m === MACH.linux ? '5-8' : '2-3') + ' 分钟装好环境' }), 'application/json');
+        // Measured on both boxes, dispatch -> first heartbeat is about a minute: Linux publishes at
+        // +11 s with its desktop listening by +49 s, Windows at +51 s. The only real variance is GitHub
+        // handing out a runner.
+        return send(JSON.stringify({ ok: true, note: '已触发，一般 1 分钟左右就绪，GitHub 繁忙时排队更久' }), 'application/json');
       }
       // A second 关机 within a minute is the same request, so remember what is already pending
       // before overwriting it: only a request the machine sat on earns a hard cancel.
@@ -286,7 +286,7 @@ export default {
           const live = await runs(env, m);
           let id = (live && live.live) || '';
           if (!id) {
-            const s = await session(true, m);
+            const s = await session(env, m);
             if (s && s.alive === true) id = s.run_id || '';
           }
           if (!id) {
@@ -364,7 +364,7 @@ async function busy(env) {
   for (const k of KEYS) {
     const m = MACH[k];
     if (env.STORE && (await env.STORE.get(m.bt))) return true;
-    const s = await session(true, m);
+    const s = await session(env, m);
     if (s && s.alive && fresh(s.check, 180)) return true;
     const r = await runs(env, m);
     if (r && r.live) return true;
@@ -377,13 +377,20 @@ function fresh(iso, seconds) {
   return !isNaN(t) && Date.now() - t < seconds * 1000;
 }
 
-async function session(force, m) {
-  // raw.githubusercontent answers with max-age=300, so this file can be minutes behind the machine
-  // it describes. The ten-second bucket only stops the edge caching it a second time.
-  const url = rawOf(m) + '?t=' + Math.floor(Date.now() / 10000);
-  return fetch(url, { cf: { cacheTtl: force ? 0 : 10, cache: 'bypass', forceRefresh: !!force } })
-    .then((r) => (r.ok ? r.json() : null))
-    .catch(() => null);
+// The heartbeat is read through the contents API, not raw.githubusercontent.com: measured 2026-10-16,
+// raw keeps serving the previous version of a path for minutes and ignores the query string, so even a
+// unique ?t= comes back stale -- that lag, not the machine, was what made the panel sit on 开机中 long
+// after the box was already up. The API answers the commit that just landed, and it is paid for with
+// the same credential 开机 uses.
+async function session(env, m) {
+  const r = await gh(env, '/repos/' + REPO + '/contents/' + m.path + '?ref=main');
+  if (!r.json || !r.json.content) return null;
+  try {
+    const bin = atob(String(r.json.content).replace(/\s+/g, ''));
+    return JSON.parse(new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0))));
+  } catch (e) {
+    return null;
+  }
 }
 
 // The run list of a public repo is readable without a token, but an anonymous call from the edge
@@ -414,13 +421,11 @@ async function status(env, m) {
   const r = await runs(env, m);
   if (r) out.run = r;
   else out.error = '读任务列表失败（GitHub 限流或未响应）';
-  const s = await session(false, m);
+  const s = await session(env, m);
   if (s) {
-    // raw answers with max-age=300, so the file can still be the previous run's alive:true for
-    // minutes after that machine was released -- and as soon as a new run is live the old check
-    // timestamp stops meaning anything. Only the record of the run that is actually live may claim
-    // a machine; anything else is a leftover, and 打开桌面/终端 on it leads nowhere. A runner killed by
-    // a cancel never writes alive:false either, so a heartbeat older than three cycles is dead too.
+    // A runner killed by a cancel never writes alive:false, so the previous run's heartbeat can outlive
+    // it -- only the record whose run_id matches the live run may claim a machine, because 打开桌面/终端
+    // on a leftover leads nowhere. A heartbeat older than three cycles is dead too.
     const mine = !(r && r.live) || String(s.run_id || '') === String(r.live);
     // session.json also carries the RDP/SSH diagnostics and log tails; the panel needs none of
     // that, so only the fields it displays leave the edge.
@@ -671,14 +676,14 @@ function app() {
     // same for both boxes because they share the tunnel and the hostname; the desktop link is not --
     // Windows goes to the fixed Access RDP app, Linux to the noVNC URL it publishes each boot.
     "var M='win',VURL='';",
-    "var waiting=false,wait0=0,hintI=Math.floor(Math.random()*6),hintAt=0;",
-    // Booting takes a few minutes and there is nothing to do meanwhile, so the wait card talks. Plain
-    // facts about what is happening, one line at a time -- the timing numbers here are the real ones.
+    "var waiting=false,wait0=0,hintI=0,hintAt=0;",
+    // The wait is short but not empty, so the card talks. Plain facts about what is happening, one line
+    // at a time -- and the timing numbers here are measured ones, not guesses.
     "var HINTS=[" +
-    "'第一次领用这台机器要排队，GitHub 分配慢，这一段最耗时'," +
+    "'GitHub 分配机器一般几秒，繁忙时才会排队'," +
     "'正在装 Git 和 cloudflared，装完才连得上隧道'," +
     "'隧道握手完成后，桌面和终端就都通了'," +
-    "'整条链路一般 2-4 分钟，Ubuntu 首次装桌面会到 5-8 分钟'," +
+    "'实测一分钟左右机器就通了，桌面再多半分钟'," +
     "'开机期间再按一次开机没有用，按钮会自己变灰'," +
     "'这台机器每次开机都是全新的，重要文件记得先放进数据胶囊'," +
     "'桌面和终端都是浏览器直连，不用装任何客户端'," +
