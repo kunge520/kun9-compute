@@ -242,9 +242,12 @@ log 'boot: debug channel'
 StartDbgListener && StartDbgTunnel
 Publish 'booting: ssh+tunnel+dbg up, desktop installing'
 
-( EnableRdp;   log "desktop: $RDPG" ) &
-( sleep 1; EnableCapsule; log "capsule: $CAPG" ) &
-wait
+( EnableRdp;   log "desktop: $RDPG" ) & RDPJOB=$!
+( sleep 1; EnableCapsule; log "capsule: $CAPG" ) & CAPJOB=$!
+# Bare `wait` would never return -- the tunnel and the debug listener are background jobs of this
+# same shell and run for the whole session, which would leave the machine up but unsupervised (no
+# heartbeat refresh, no panel stop). Wait on the two installs by pid.
+wait "$RDPJOB"; wait "$CAPJOB"
 
 Publish "desktop=$RDPG capsule=$CAPG dbg=$DBGPG"
 log "reachable: https://ssh.kun9.ccwu.cc  (runner / \$WT_RDP_PASS)  ttl=${MIN}m"
