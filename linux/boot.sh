@@ -158,15 +158,23 @@ EnableRdp() {
     sudo adduser xrdp ssl-cert >/dev/null 2>&1
   fi
   # Replaced, not probed: startwm.sh differs between images and whatever it does by default, execing
-  # startxfce4 is the whole requirement for a session that IronRDP can display.
-  printf '#!/bin/sh\nexport XDG_RUNTIME_DIR=/run/user/$(id -u)\nexec startxfce4\n' | sudo tee /etc/xrdp/startwm.sh >/dev/null
+  # startxfce4 is the whole requirement for a session that IronRDP can display. The runtime dir is
+  # created because the session user is root, and /run/user/0 does not exist on a runner.
+  printf '#!/bin/sh\nexport XDG_RUNTIME_DIR=/run/user/$(id -u)\nmkdir -p "$XDG_RUNTIME_DIR"\nchmod 700 "$XDG_RUNTIME_DIR"\nexec startxfce4\n' | sudo tee /etc/xrdp/startwm.sh >/dev/null
   sudo chmod +x /etc/xrdp/startwm.sh
-  # autorun=Xorg: with it empty xrdp answers a client that sends credentials (Cloudflare's IronRDP does)
-  # by drawing its OWN login window, and that window is painted with classic bitmap updates the web
-  # client renders as diagonal garbage -- the desktop never even starts. Naming the section makes xrdp
-  # log the client's username straight into Xorg instead.
+  # Cloudflare's browser client never puts the username/password into the RDP Client Info PDU (sesman
+  # logs show zero login attempts), so xrdp falls back to drawing its OWN login window -- and that
+  # window is painted with classic bitmap orders that the web client renders as diagonal garbage.
+  # Nothing can be typed into a garbled box, so the box is removed: the section carries root's
+  # credentials and autorun picks it, which drops the client straight into the desktop.
+  if [ -n "$WT_RDP_PASS" ]; then
+    sudo sed -i -e "/^\[Xorg\]/,/^\$/ s/^username=ask\$/username=root/" \
+                -e "/^\[Xorg\]/,/^\$/ s/^password=ask\$/password=$WT_RDP_PASS/" /etc/xrdp/xrdp.ini
+  fi
   sudo sed -i 's/^autorun=$/autorun=Xorg/' /etc/xrdp/xrdp.ini
-  grep -q '^autorun=Xorg' /etc/xrdp/xrdp.ini || echo 'xrdp.ini: autorun not set, 网页桌面会停在 xrdp 自己的登录框'
+  grep -q '^autorun=Xorg' /etc/xrdp/xrdp.ini || log 'xrdp.ini: autorun 没写进去，网页桌面会停在 xrdp 自己的登录框'
+  # The file now holds a password: readable by root and by the xrdp user only (xrdp must read it).
+  sudo chown root:xrdp /etc/xrdp/xrdp.ini && sudo chmod 640 /etc/xrdp/xrdp.ini
   sudo service xrdp restart >/dev/null 2>&1 || sudo service xrdp start >/dev/null 2>&1
   sleep 3
   if ss -tln 2>/dev/null | grep -q ':3389 '; then RDPG='listening'; log 'xrdp listening on 3389'; return 0; fi
@@ -193,14 +201,20 @@ EnableCapsule() {
     printf 'secret_access_key = %s\n' "$CST_S3_AKSEC"
     printf 'endpoint = s3.cstcloud.cn\naddressing_style = path\n'; } >"$HOME/cf/cap.conf"
   chmod 600 "$HOME/cf/cap.conf"
-  # Mounted by the SSH user, not root: a FUSE mount is only readable by the user that made it unless
-  # allow_other is granted through fuse.conf, and runner is exactly the account that uses the files.
+  # Still mounted by runner (the S3 keys and the cache live in that home), but the desktop session
+  # logs in as root, and a plain FUSE mount is closed to every other uid including root -- hence
+  # allow_other through fuse.conf, plus a link so 文件管理器 shows it as ~/capsule either way.
+  sudo sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf
+  grep -q '^user_allow_other' /etc/fuse.conf || echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
   nohup "$HOME/cf/rclone" mount --config "$HOME/cf/cap.conf" capsule:github "$d" \
-    --volname capsule --vfs-cache-mode writes --dir-cache-time 30s --log-level INFO \
-    --log-file "$HOME/cf/cap.log" >"$HOME/cf/cap.out" 2>&1 &
+    --volname capsule --vfs-cache-mode writes --dir-cache-time 30s --allow-other \
+    --log-level INFO --log-file "$HOME/cf/cap.log" >"$HOME/cf/cap.out" 2>&1 &
   for _ in $(seq 1 12); do
     sleep 2
-    mountpoint -q "$d" 2>/dev/null && { CAPG="mounted $d"; log "capsule mounted at $d"; return 0; }
+    mountpoint -q "$d" 2>/dev/null && {
+      CAPG="mounted $d"; log "capsule mounted at $d"
+      sudo ln -sfn "$d" /root/capsule 2>/dev/null
+      return 0; }
   done
   CAPG='mount-failed'
   return 1

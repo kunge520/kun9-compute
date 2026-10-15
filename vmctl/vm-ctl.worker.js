@@ -690,7 +690,7 @@ function app() {
     " $('run').textContent=u?('#'+(u.number||'')+' '+u.status+(u.conclusion?' / '+u.conclusion:'')):'-';",
     // The Linux box is a learning machine, so the panel hands over the plain-terminal form too: with
     // the ProxyCommand entry in ~/.ssh/config this is an ordinary ssh, no browser involved.
-    " var extra=(M==='linux'&&alive)?('<br>本机终端：ssh runner@ssh.kun9.ccwu.cc'):'';",
+    " var extra=(M==='linux'&&alive)?('<br>本机终端：ssh root@ssh.kun9.ccwu.cc'):'';",
     " $('note').innerHTML=(v.note?('状态：'+esc(v.note)+(v.restarts>0?(' · 隧道重连过 '+esc(v.restarts)+' 次'):'')):'')+(v.rdp?('<br>桌面 '+esc(v.rdp)):'')+(v.origin?('<br>终端 '+esc(v.origin)):'')+(v.capsule?('<br>胶囊 '+esc(v.capsule)):'')+(r.error?('<br>'+esc(r.error)):'')+extra;",
     " $('log').href=u.url||'https://github.com/kunge520/kun9-compute/actions';",
     " $('bssh').disabled=!alive;",
