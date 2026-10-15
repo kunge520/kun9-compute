@@ -11,10 +11,21 @@
 // The secrets kept in this Worker are PANEL_KEY, the password for the page, and that optional token.
 
 const REPO = 'kunge520/kun9-compute';
-const WF = 'winterm.yml';
 const API = 'https://api.github.com';
-const RAW = 'https://raw.githubusercontent.com/' + REPO + '/main/winterm/session.json';
-const RUNS = '/repos/' + REPO + '/actions/workflows/' + WF + '/runs?per_page=3';
+// Two machines, one panel, and only ever one of them up. They share a single named tunnel and a
+// single pair of hostnames, so 打开桌面/打开终端 below are the same two links for both boxes and can
+// never point at the wrong machine -- but it also means busy() is global: a live Windows box blocks
+// a Linux start, because two connectors on one tunnel would split the same hostname between them.
+// Windows keeps the legacy KV keys so an in-flight request survives this deploy.
+const MACH = {
+  win: { name: 'Windows', wf: 'winterm.yml', path: 'winterm/session.json', pw: 'power', bt: 'booting' },
+  linux: { name: 'Linux', wf: 'linuxd.yml', path: 'linux/session.json', pw: 'power:linux', bt: 'booting:linux' },
+};
+const KEYS = ['win', 'linux'];
+// Default win: winterm.yml polls these endpoints with no machine parameter and must not change.
+const pick = (x) => (String(x || '').toLowerCase() === 'linux' ? MACH.linux : MACH.win);
+const rawOf = (m) => 'https://raw.githubusercontent.com/' + REPO + '/main/' + m.path;
+const runsOf = (m) => '/repos/' + REPO + '/actions/workflows/' + m.wf + '/runs?per_page=3';
 const COOKIE = 'vmctl';
 // Browser RDP/SSH are only served to a request Access already trusts, and the only trust this kit can
 // mint by itself is its own OIDC provider: the panel cookie IS the identity, so 打开桌面/打开终端
@@ -43,28 +54,33 @@ export default {
     if (url.pathname === '/favicon.ico') return new Response(null, { status: 204 });
 
     // ---- machine-facing endpoints: no cookie, they answer nothing a runner could abuse ----
+    // ?m=linux selects the Ubuntu box; no parameter means the Windows box, which is what winterm.yml
+    // has always sent.
     if (url.pathname === '/api/claim') {
-      const q = await read(env, 'power');
+      const m = pick(url.searchParams.get('m'));
+      const q = await read(env, m.pw);
       if (!q || q.action !== 'start') return send(JSON.stringify({ action: 'none' }), 'application/json');
-      if (await busy(env, true)) return send(JSON.stringify({ action: 'wait', reason: 'busy' }), 'application/json');
-      await env.STORE.delete('power');
+      if (await busy(env, m)) return send(JSON.stringify({ action: 'wait', reason: 'busy' }), 'application/json');
+      await env.STORE.delete(m.pw);
       // Fifteen minutes is only the gap between a claimed start and that machine's first
       // heartbeat; longer would let a runner killed before it published refuse new starts.
-      await env.STORE.put('booting', '1', { expirationTtl: 900 });
+      await env.STORE.put(m.bt, '1', { expirationTtl: 900 });
       return send(JSON.stringify({ action: 'start', queued_at: q.at }), 'application/json');
     }
     if (url.pathname === '/api/power') {
+      const m = pick(url.searchParams.get('m'));
       // The live VM is the only thing that polls this, so its first poll is also the proof that
       // the claimed start actually became a machine -- which lets the panel trust 'booting' for
       // the few minutes between claim and boot, and drop it the moment the boot is real.
-      if (env.STORE && (await env.STORE.get('booting'))) await env.STORE.delete('booting');
-      const q = await read(env, 'power');
+      if (env.STORE && (await env.STORE.get(m.bt))) await env.STORE.delete(m.bt);
+      const q = await read(env, m.pw);
       return send(JSON.stringify({ action: q && (q.action === 'stop' || q.action === 'rdp') ? q.action : 'none' }), 'application/json');
     }
     if (req.method === 'POST' && url.pathname === '/api/power/clear') {
-      const q = await read(env, 'power');
-      if (q && (q.action === 'stop' || q.action === 'rdp')) await env.STORE.delete('power');
-      await env.STORE.delete('booting');
+      const m = pick(url.searchParams.get('m'));
+      const q = await read(env, m.pw);
+      if (q && (q.action === 'stop' || q.action === 'rdp')) await env.STORE.delete(m.pw);
+      await env.STORE.delete(m.bt);
       return send(JSON.stringify({ ok: true }), 'application/json');
     }
 
@@ -219,35 +235,41 @@ export default {
       return send(JSON.stringify({ ok: true, note: '能用。开机从此是即时触发，关机仍然靠机器自己退出' }), 'application/json');
     }
 
-    if (url.pathname === '/api/status') return send(JSON.stringify(await status(env)), 'application/json');
+    if (url.pathname === '/api/status') return send(JSON.stringify(await status(env, pick(url.searchParams.get('m')))), 'application/json');
 
     if (req.method === 'POST' && url.pathname === '/api/queue') {
-      const want = String((await readJson(req)).action || '');
+      const body = await readJson(req);
+      const want = String(body.action || '');
+      const m = pick(body.m);
       if (want !== 'start' && want !== 'stop' && want !== 'rdp') return send(JSON.stringify({ ok: false, note: 'action 只能是 start、stop 或 rdp' }), 'application/json', 400);
       if (want === 'rdp') {
         // Desktop repair on a live machine: redo the listener setup and report what the connector
         // can actually reach, without a reboot. Only a running machine has a console worth fixing.
-        const live = await runs(env);
-        const s = await session();
+        const live = await runs(env, m);
+        const s = await session(false, m);
         if (!(live && live.live) && !(s && s.alive === true && fresh(s.check, 180))) {
           return send(JSON.stringify({ ok: false, note: '机器没开着，桌面没什么可修的' }), 'application/json', 409);
         }
-        await env.STORE.put('power', JSON.stringify({ action: 'rdp', at: new Date().toISOString() }), { expirationTtl: 300 });
+        await env.STORE.put(m.pw, JSON.stringify({ action: 'rdp', at: new Date().toISOString() }), { expirationTtl: 300 });
         return send(JSON.stringify({ ok: true, note: '已下发，机器 20 秒内重配桌面并回报连通性' }), 'application/json');
       }
-      if (want === 'start' && await busy(env)) {
+      if (want === 'start' && await busy(env, null)) {
         return send(JSON.stringify({ ok: false, note: '已经有机器在跑或正在开机，先关机再说' }), 'application/json', 409);
       }
       // A second 关机 within a minute is the same request, so remember what is already pending
       // before overwriting it: only a request the machine sat on earns a hard cancel.
-      const prev = await read(env, 'power');
+      const prev = await read(env, m.pw);
       // Both flags expire: a start is good for an hour (GitHub can hold the first tick of a
       // freshly-added cron well past five minutes, and a queued start that never got claimed is
       // not worth an hour of a machine nobody asked for either), and a stop the current machine
       // never got to read must not kill the next one.
-      await env.STORE.put('power', JSON.stringify({ action: want, at: new Date().toISOString() }), { expirationTtl: 3600 });
-      if (want === 'start') await env.STORE.put('booting', '1', { expirationTtl: 900 });
-      let note = want === 'start' ? '已排队，看门狗最迟 5 分钟内接手，再等 2-3 分钟装好环境' : '已下发关机，机器最多 20 秒后自停';
+      await env.STORE.put(m.pw, JSON.stringify({ action: want, at: new Date().toISOString() }), { expirationTtl: 3600 });
+      if (want === 'start') await env.STORE.put(m.bt, '1', { expirationTtl: 900 });
+      // The Linux box pulls xfce4 + xrdp through apt on every boot, so its honest estimate is longer
+      // than the Windows one -- a wrong ETA reads as a hung machine.
+      let note = want === 'start'
+        ? '已排队，看门狗最迟 5 分钟内接手，再等 ' + (m === MACH.linux ? '5-8' : '2-3') + ' 分钟装好环境'
+        : '已下发关机，机器最多 20 秒后自停';
 
       // Optional accelerator: one fine-grained token (this repo, Actions write) pasted at /token
       // turns a queued start into a dispatch, and gives 关机 a force button. The flag is the
@@ -257,10 +279,10 @@ export default {
       // squats holds both the free minutes and busy(), which is what blocks the next 开机.
       if (await token(env)) {
         if (want === 'start') {
-          const r = await gh(env, '/repos/' + REPO + '/actions/workflows/' + WF + '/dispatches', { method: 'POST', body: { ref: 'main' } });
+          const r = await gh(env, '/repos/' + REPO + '/actions/workflows/' + m.wf + '/dispatches', { method: 'POST', body: { ref: 'main' } });
           if (r.status === 204) {
-            await env.STORE.delete('power');
-            note = '已即时触发，2-3 分钟后就绪';
+            await env.STORE.delete(m.pw);
+            note = '已即时触发，就绪后刷新页面';
           } else {
             note += '（即时触发失败：' + (r.note || r.status) + '，看门狗兜底）';
           }
@@ -269,19 +291,19 @@ export default {
           // record's own run_id only counts while the machine claims to be alive, because GitHub
           // rejects a cancel on a finished run and the flag would then sit there until it kills
           // the next machine.
-          const live = await runs(env);
+          const live = await runs(env, m);
           let id = (live && live.live) || '';
           if (!id) {
-            const s = await session(true);
+            const s = await session(true, m);
             if (s && s.alive === true) id = s.run_id || '';
           }
           if (!id) {
-            await env.STORE.delete('power');
+            await env.STORE.delete(m.pw);
             note = '没有在跑的任务，关机标记已清掉';
           } else {
             const r = await gh(env, '/repos/' + REPO + '/actions/runs/' + id + '/cancel', { method: 'POST' });
             if (r.status === 202) {
-              await env.STORE.delete('power');
+              await env.STORE.delete(m.pw);
               note = '机器没响应，已强制取消任务 #' + id;
             } else {
               note += '（强制取消 #' + id + ' 失败：' + (r.note || r.status) + '）';
@@ -340,16 +362,22 @@ async function gh(env, path, opts) {
   return { status: res.status, json: json, note: json && json.message ? String(json.message).slice(0, 160) : '' };
 }
 
-// Never bring up a second machine: the watchdog may only claim a start when no heartbeat is
-// fresh and no run of this workflow is still queued or in progress.
-async function busy(env, ignoreBooting) {
-  // 'booting' is written by the panel the moment it queues a start, so the watchdog must not read
-  // it as evidence of a machine -- it is evidence of the very request it is here to claim.
-  if (!ignoreBooting && env.STORE && (await env.STORE.get('booting'))) return true;
-  const s = await session(true);
-  if (s && s.alive && fresh(s.check, 180)) return true;
-  const r = await runs(env);
-  return !!(r && r.live);
+// Never bring up a second machine: the watchdog may only claim a start when no heartbeat of EITHER
+// box is fresh and no run of EITHER workflow is still queued or in progress. The mutex is global on
+// purpose -- both boxes share one tunnel and one hostname pair, so two live connectors would split
+// the same address between them.
+// ignoreM is the machine doing the claiming: its own 'booting' flag is the very request it is here to
+// consume, so it must not read as evidence of a machine; every other flag must.
+async function busy(env, ignoreM) {
+  for (const k of KEYS) {
+    const m = MACH[k];
+    if (m !== ignoreM && env.STORE && (await env.STORE.get(m.bt))) return true;
+    const s = await session(true, m);
+    if (s && s.alive && fresh(s.check, 180)) return true;
+    const r = await runs(env, m);
+    if (r && r.live) return true;
+  }
+  return false;
 }
 
 function fresh(iso, seconds) {
@@ -357,10 +385,10 @@ function fresh(iso, seconds) {
   return !isNaN(t) && Date.now() - t < seconds * 1000;
 }
 
-async function session(force) {
+async function session(force, m) {
   // raw.githubusercontent answers with max-age=300, so this file can be minutes behind the machine
   // it describes. The ten-second bucket only stops the edge caching it a second time.
-  const url = RAW + '?t=' + Math.floor(Date.now() / 10000);
+  const url = rawOf(m) + '?t=' + Math.floor(Date.now() / 10000);
   return fetch(url, { cf: { cacheTtl: force ? 0 : 10, cache: 'bypass', forceRefresh: !!force } })
     .then((r) => (r.ok ? r.json() : null))
     .catch(() => null);
@@ -370,31 +398,31 @@ async function session(force) {
 // shares one IP's 60/h budget with every other Worker on the same IP, so it fails often enough to
 // matter. With a token this becomes an authenticated call and stops being a coin flip; busy(),
 // which refuses to bring up a second machine, is the reason the answer has to be dependable.
-async function runs(env) {
-  const res = await gh(env, RUNS);
+async function runs(env, m) {
+  const res = await gh(env, runsOf(m));
   if (!res.json || !res.json.workflow_runs || !res.json.workflow_runs.length) return null;
   const list = res.json.workflow_runs;
   const live = list.filter((r) => r.status === 'in_progress' || r.status === 'queued');
-  const pick = live.length ? live[0] : list[0];
+  const pickRun = live.length ? live[0] : list[0];
   return {
-    id: pick.id,
-    number: pick.run_number,
-    status: pick.status,
-    conclusion: pick.conclusion,
-    created: pick.created_at,
-    event: pick.event,
-    url: pick.html_url,
-    live: live.length ? pick.id : null,
+    id: pickRun.id,
+    number: pickRun.run_number,
+    status: pickRun.status,
+    conclusion: pickRun.conclusion,
+    created: pickRun.created_at,
+    event: pickRun.event,
+    url: pickRun.html_url,
+    live: live.length ? pickRun.id : null,
   };
 }
 
-async function status(env) {
-  const out = { now: new Date().toISOString(), vm: null, run: null, queue: null, error: '', has_token: false };
+async function status(env, m) {
+  const out = { now: new Date().toISOString(), machine: m.name, vm: null, run: null, queue: null, error: '', has_token: false };
   out.has_token = !!(await token(env));
-  const r = await runs(env);
+  const r = await runs(env, m);
   if (r) out.run = r;
   else out.error = '读任务列表失败（GitHub 限流或未响应）';
-  const s = await session();
+  const s = await session(false, m);
   if (s) {
     // raw answers with max-age=300, so the file can still be the previous run's alive:true for
     // minutes after that machine was released -- and as soon as a new run is live the old check
@@ -417,11 +445,12 @@ async function status(env) {
       origin: mine ? String(s.ssh_info || '') : '',
       rdp: mine ? String(s.rdp_diag || '') : '',
       rdp_ip: mine ? String(s.rdp_ip || '') : '',
+      capsule: mine ? String(s.capsule || '') : '',
       ttl_min: s.ttl_min,
       closed: s.closed || '',
     };
   }
-  out.queue = await read(env, 'power');
+  out.queue = await read(env, m.pw);
   return out;
 }
 
@@ -540,6 +569,7 @@ function page(title, mode) {
   return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
     '<title>' + title + '</title><style>' + css() + '</style></head><body><div class="wrap">' +
     '<div class="card head"><div><h1>' + title + '</h1><div id="state" class="state">读取中…</div></div><div id="dot" class="dot"></div></div>' +
+    '<div class="card tabs"><button id="m-win">Windows</button><button id="m-linux">Linux（学习用）</button></div>' +
     '<div class="card" id="wait" style="display:none"><div class="phase"><div class="spin"></div><div><b id="ph">正在开机</b><div id="elapsed" class="mut"></div></div></div>' +
     '<div class="bar"><i></i></div><div id="hint" class="hint"></div></div>' +
     '<div class="card"><div class="grid">' +
@@ -589,6 +619,11 @@ function css() {
     '.grid b{font-weight:600;word-break:break-all;font-size:14px;color:var(--ink);text-shadow:0 0 7px rgba(34,231,255,.3)}',
     '.note{margin-top:12px;color:var(--mut);font-size:12px;word-break:break-all;line-height:1.8}',
     '.acts{display:flex;gap:10px;align-items:stretch;flex-wrap:wrap}',
+    // Machine switch: two buttons, one panel. Only one box can be up, so the inactive one is just a
+    // view -- picking it re-reads that machine\'s heartbeat and swaps the buttons onto it.
+    '.tabs{display:flex;gap:10px;padding:8px 10px}',
+    '.tabs button{flex:1 1 auto;min-width:0;padding:8px 4px;font-size:12px;letter-spacing:1.5px;opacity:.55}',
+    '.tabs button.on{opacity:1;background:rgba(34,231,255,.16);box-shadow:0 0 10px rgba(34,231,255,.35) inset}',
     'button{flex:1 1 auto;min-width:120px;padding:12px 6px;border:1px solid var(--cy);background:rgba(34,231,255,.06);color:var(--cy);font:inherit;font-size:14px;font-weight:700;letter-spacing:2px;text-transform:uppercase;cursor:pointer;transition:.18s;clip-path:polygon(0 9px,9px 0,calc(100% - 9px) 0,100% 9px,100% calc(100% - 9px),calc(100% - 9px) 100%,9px 100%,0 calc(100% - 9px))}',
     'button:hover{filter:drop-shadow(0 0 9px currentColor)}',
     'button:active{transform:translateY(1px)}',
@@ -628,8 +663,15 @@ function app() {
     "function say(m){$('msg').textContent=m||''}",
     "var HINTS=['GitHub 的免费 Windows 机器要先排队领用，这一步最慢','正在装 Git / cloudflared','隧道在握手，第一次连会慢一点','整条链路一般是 2-4 分钟','机器起来后按「打开桌面」或「打开终端」','趁这个空档可以去倒杯水','开机期间再按一次开机是没用的，按钮会自己变灰','桌面走 RDP，终端走 SSH，都是 Cloudflare 直出，不用装客户端'];",
     "var waiting=false,wait0=0,hintI=0,hintAt=0;",
+    // One view, two machines. M is the selected machine and every call carries it; the RDP/SSH links
+    // are NOT machine-specific, because both boxes share the tunnel and the hostnames.
+    "var M='win';",
+    "function setM(x){M=x;$('m-win').className=x==='win'?'on':'';$('m-linux').className=x==='linux'?'on':'';tick();}",
+    "$('m-win').onclick=function(){setM('win')};",
+    "$('m-linux').onclick=function(){setM('linux')};",
+    "setM('win');",
     "async function tick(){",
-    " var r;try{r=await(await fetch('/api/status',{cache:'no-store'})).json()}catch(e){say('读取失败：'+e);return}",
+    " var r;try{r=await(await fetch('/api/status?m='+M,{cache:'no-store'})).json()}catch(e){say('读取失败：'+e);return}",
     " var v=r.vm||{},u=r.run||{},q=r.queue,alive=v&&v.alive,runLive=u&&u.live;",
     " var dot=$('dot'),st=$('state');",
     " var phase='';",
@@ -642,11 +684,14 @@ function app() {
     " $('wait').style.display=phase?'':'none';",
     " if(phase){$('ph').textContent=phase==='boot'?'正在开机：机器还没开始上报':'排队开机：等看门狗接手';wait0=(new Date(String(phase==='boot'?(u.created||''):(q.at||''))).getTime())||0;}",
     " $('url').textContent=v.url||'-';",
-    " $('user').textContent=alive?(v.user||'-'):'administrator';",
+    " $('user').textContent=alive?(v.user||'-'):(M==='linux'?'runner':'administrator');",
     " $('ends').textContent=fmt(v.ends);",
     " $('check').textContent=fmt(v.check);",
     " $('run').textContent=u?('#'+(u.number||'')+' '+u.status+(u.conclusion?' / '+u.conclusion:'')):'-';",
-    " $('note').innerHTML=(v.note?('状态：'+esc(v.note)+(v.restarts>0?(' · 隧道重连过 '+esc(v.restarts)+' 次'):'')):'')+(v.rdp?('<br>桌面 '+esc(v.rdp)):'')+(v.origin?('<br>终端 '+esc(v.origin)):'')+(r.error?('<br>'+esc(r.error)):'');",
+    // The Linux box is a learning machine, so the panel hands over the plain-terminal form too: with
+    // the ProxyCommand entry in ~/.ssh/config this is an ordinary ssh, no browser involved.
+    " var extra=(M==='linux'&&alive)?('<br>本机终端：ssh runner@ssh.kun9.ccwu.cc'):'';",
+    " $('note').innerHTML=(v.note?('状态：'+esc(v.note)+(v.restarts>0?(' · 隧道重连过 '+esc(v.restarts)+' 次'):'')):'')+(v.rdp?('<br>桌面 '+esc(v.rdp)):'')+(v.origin?('<br>终端 '+esc(v.origin)):'')+(v.capsule?('<br>胶囊 '+esc(v.capsule)):'')+(r.error?('<br>'+esc(r.error)):'')+extra;",
     " $('log').href=u.url||'https://github.com/kunge520/kun9-compute/actions';",
     " $('bssh').disabled=!alive;",
     " $('brdp').disabled=!alive;",
@@ -658,8 +703,8 @@ function app() {
     " $('upd').textContent='刷新于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});",
     "}",
     "$('bssh').onclick=function(){window.open(SSHBASE,'_blank')};",
-    "$('bstart').onclick=async function(){say('正在排队开机…');var x=await post('/api/queue',{action:'start'});say(x.j.note||(x.j.ok?'已排队':'开机失败：'+x.code));setTimeout(tick,1500)};",
-    "$('bstop').onclick=async function(){if(!confirm('确定关机？这台机器上的未保存内容会丢。'))return;say('正在下发关机…');var x=await post('/api/queue',{action:'stop'});say(x.j.note||(x.j.ok?'已下发':'关机失败：'+x.code));setTimeout(tick,1500)};",
+    "$('bstart').onclick=async function(){say('正在排队开机…');var x=await post('/api/queue',{action:'start',m:M});say(x.j.note||(x.j.ok?'已排队':'开机失败：'+x.code));setTimeout(tick,1500)};",
+    "$('bstop').onclick=async function(){if(!confirm('确定关机？这台机器上的未保存内容会丢。'))return;say('正在下发关机…');var x=await post('/api/queue',{action:'stop',m:M});say(x.j.note||(x.j.ok?'已下发':'关机失败：'+x.code));setTimeout(tick,1500)};",
     "var SSHBASE='" + SSH_APP + "';",
     "var RDPURL='" + RDP_APP + '/rdp/' + RDP_VNET + '/' + RDP_TARGET + "/3389';",
     "$('brdp').onclick=function(){window.open(RDPURL,'_blank')};",

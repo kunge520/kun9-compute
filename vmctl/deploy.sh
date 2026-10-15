@@ -52,17 +52,18 @@ esc() { tr -d '\r\n' < "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 TOK=$(sed -n '9p' "$SECRETS" | tr -d '\r\n ')
 ACCT=$(sed -n '5p' "$SECRETS" | tr -d '\r\n ')
 printf 'header = "Authorization: Bearer %s"\n' "$TOK" > "$WD/.cf"
-printf '%s' '{"main_module":"vm-ctl.worker.js","compatibility_date":"'"$CDATE"'","bindings":[\
-{"name":"PANEL_KEY","type":"secret_text","text":"'"$(esc "$VAULT/console_key.txt")"'"},\
-{"name":"IDP_JWK","type":"secret_text","text":"'"$(esc "$VAULT/idp_jwk.json")"'"},\
-{"name":"IDP_SECRET","type":"secret_text","text":"'"$(esc "$VAULT/idp_client_secret.txt")"'"},\
-{"name":"STORE","type":"kv_namespace","namespace_id":"'"$KV"'"}]}' > "$WD/metadata.json"
+# One line, deliberately: a backslash-newline inside single quotes is NOT a continuation in bash, it
+# is a literal backslash, and Cloudflare rejects the metadata part as unparsable JSON (code 10021).
+printf '%s' '{"main_module":"vm-ctl.worker.js","compatibility_date":"'"$CDATE"'","bindings":[{"name":"PANEL_KEY","type":"secret_text","text":"'"$(esc "$VAULT/console_key.txt")"'"},{"name":"IDP_JWK","type":"secret_text","text":"'"$(esc "$VAULT/idp_jwk.json")"'"},{"name":"IDP_SECRET","type":"secret_text","text":"'"$(esc "$VAULT/idp_client_secret.txt")"'"},{"name":"STORE","type":"kv_namespace","namespace_id":"'"$KV"'"}]}' > "$WD/metadata.json"
 
 code=$(curl -sS -m 120 --config "$WD/.cf" -o "$WD/out.json" -w '%{http_code}' -X PUT \
   "https://api.cloudflare.com/client/v4/accounts/$ACCT/workers/scripts/$WORKER" \
   --form "metadata=@$WD/metadata.json;type=application/json;filename=" \
   --form "vm-ctl.worker.js=@$WD/vm-ctl.worker.js;type=application/javascript+module;filename=vm-ctl.worker.js")
 echo "deploy=$code"
+# The messages array alone is not enough to fix a rejected upload -- print the raw response whenever
+# the deploy failed, because the trap deletes the working directory the moment the script exits.
+[ "$code" = 200 ] || head -c 1200 "$WD/out.json"
 grep -o '"success":[a-z]*\|"message":"[^"]*"' "$WD/out.json" | head -4
 curl -sS -m 30 -o "$WD/jwks.json" -w 'jwks=%{http_code}\n' https://ctl.kun9.ccwu.cc/oidc/jwks
 grep -o '"kty":"RSA"\|"kid":"[^"]*"\|"d":' "$WD/jwks.json" | head -3
