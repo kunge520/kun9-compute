@@ -544,8 +544,8 @@ function page(title, mode) {
   if (mode === '登录') {
     return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
       '<title>' + title + '</title><style>' + css() + '</style></head><body><div class="wrap"><form class="card login" method="post" action="/api/login">' +
-      '<h1>' + title + '</h1><p>网页控制台面板</p><input type="password" name="p" placeholder="面板口令" autofocus autocomplete="current-password">' +
-      '<input type="hidden" name="next" id="next"><button type="submit">进入</button></form></div>' +
+      '<h1>' + title + '</h1><p>输入面板口令进入</p><input type="password" name="p" placeholder="面板口令" autofocus autocomplete="current-password">' +
+      '<input type="hidden" name="next" id="next"><button type="submit" class="pri">进入</button></form></div>' +
       '<script>var n=new URLSearchParams(location.search).get("next");if(n&&n.indexOf("/oidc/authorize?")==0)document.getElementById("next").value=n;</script>' +
       '</body></html>';
   }
@@ -558,7 +558,7 @@ function page(title, mode) {
       'Repository access 选 Only select repositories → kunge520/kun9-compute，Permissions 只勾 Actions: Read and write。' +
       '它只存在这个 Worker 里，页面永远不会把它回显出来。</p>' +
       '<input type="password" id="t" placeholder="粘贴 github_pat_…" autocomplete="off">' +
-      '<button type="submit">校验并存起来</button><div id="m" class="msg"></div></form>' +
+      '<button type="submit" class="pri">校验并存起来</button><div id="m" class="msg"></div></form>' +
       '<div class="foot"><a href="/">回面板</a></div></div>' +
       '<script>document.getElementById("f").onsubmit=async function(e){e.preventDefault();' +
       'var m=document.getElementById("m");m.textContent="校验中…";' +
@@ -568,89 +568,98 @@ function page(title, mode) {
   }
   return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
     '<title>' + title + '</title><style>' + css() + '</style></head><body><div class="wrap">' +
-    '<div class="card head"><div><h1>' + title + '</h1><div id="state" class="state">读取中…</div></div><div id="dot" class="dot"></div></div>' +
-    '<div class="card tabs"><button id="m-win">Windows</button><button id="m-linux">Linux（学习用）</button></div>' +
-    '<div class="card" id="wait" style="display:none"><div class="phase"><div class="spin"></div><div><b id="ph">正在开机</b><div id="elapsed" class="mut"></div></div></div>' +
-    '<div class="bar"><i></i></div><div id="hint" class="hint"></div></div>' +
-    '<div class="card"><div class="grid">' +
-    '<div><span>地址</span><b id="url">-</b></div>' +
+    '<header class="bar"><div class="brand">' + title + '</div>' +
+    '<div class="seg"><button id="m-win">Windows</button><button id="m-linux">Ubuntu</button></div></header>' +
+    '<div class="card">' +
+    '<div class="stat"><span id="dot" class="dot"></span><span id="state" class="stat-t">读取中…</span><span id="left" class="left"></span></div>' +
+    '<div id="wait" class="wait" style="display:none"><div class="wrow"><b id="ph">正在开机</b><span id="elapsed" class="mut"></span></div><div class="bar2"><i></i></div><div id="hint" class="hint"></div></div>' +
+    '<div class="grid">' +
+    '<div><span>桌面地址</span><b id="url">-</b></div>' +
     '<div><span>登录名</span><b id="user">-</b></div>' +
-    '<div><span>到期</span><b id="ends">-</b></div>' +
-    '<div><span>剩余</span><b id="left">-</b></div>' +
-    '<div><span>任务</span><b id="run">-</b></div>' +
-    '<div><span>心跳</span><b id="check">-</b></div>' +
-    '</div><div id="note" class="note"></div></div>' +
-    '<div class="card acts">' +
-    '<button id="brdp" class="term">打开桌面</button>' +
-    '<button id="bssh" class="term">打开终端</button>' +
-    '<button id="bstart" class="ok">开机</button>' +
-    '<button id="bstop" class="stop">关机</button>' +
-    '<a class="log" id="log" href="#" target="_blank">看日志</a>' +
+    '<div><span>到期时间</span><b id="ends">-</b></div>' +
+    '<div><span>运行编号</span><b id="run">-</b></div>' +
+    '<div><span>最近上报</span><b id="check">-</b></div>' +
+    '</div>' +
+    '<div id="ssh" class="sshline"></div>' +
+    '<details class="adv"><summary>详细信息</summary><div id="note" class="note"></div></details>' +
+    '</div>' +
+    '<div class="acts">' +
+    '<button id="brdp" class="pri">打开桌面</button>' +
+    '<button id="bssh">打开终端</button>' +
+    '<button id="bstart">开机</button>' +
+    '<button id="bstop" class="dan">关机</button>' +
     '</div>' +
     '<div id="msg" class="msg"></div>' +
-    '<div class="foot"><span id="upd"></span><a id="tok" href="/token">配令牌（可选，秒开机）</a><a href="/logout">退出</a></div>' +
+    '<footer class="foot"><span id="upd"></span><span class="links">' +
+    '<a id="log" href="#" target="_blank">运行日志</a><a id="tok" href="/token">配令牌</a><a href="/logout">退出</a>' +
+    '</span></footer>' +
     '</div><script>' + app() + '</script></body></html>';
 }
 
 function css() {
   return [
     '*{box-sizing:border-box}',
-    ':root{--bg:#05070e;--ink:#d8fbff;--mut:#5f7c8a;--cy:#22e7ff;--mg:#ff2e88;--pu:#8b5cff;--li:#24ffa0;--am:#ffc93c;--line:rgba(34,231,255,.28)}',
+    ':root{--bg:#f5f6f8;--card:#fff;--line:#e2e5e9;--ink:#1c2025;--mut:#69727d;--acc:#2f6fed;--acc2:#eaf0fe;--ok:#12805c;--wait:#a8600a;--bad:#c33a3a;--shadow:0 1px 2px rgba(16,20,28,.06)}',
     'html{background:var(--bg)}',
-    'body{margin:0;min-height:100vh;color:var(--ink);letter-spacing:.3px;font:14px/1.7 "Cascadia Mono","JetBrains Mono",ui-monospace,Consolas,"DejaVu Sans Mono","Microsoft YaHei",monospace;background:radial-gradient(1100px 600px at 8% -10%,rgba(34,231,255,.12),transparent 60%),radial-gradient(950px 700px at 108% 12%,rgba(255,46,136,.12),transparent 55%),radial-gradient(900px 900px at 50% 120%,rgba(139,92,255,.10),transparent 60%),var(--bg)}',
-    'body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;background-image:linear-gradient(rgba(34,231,255,.05) 1px,transparent 1px),linear-gradient(90deg,rgba(34,231,255,.05) 1px,transparent 1px);background-size:34px 34px;-webkit-mask-image:radial-gradient(circle at 50% 35%,#000,transparent 78%);mask-image:radial-gradient(circle at 50% 35%,#000,transparent 78%)}',
-    'body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:40;opacity:.26;background:repeating-linear-gradient(transparent 0 2px,rgba(0,0,0,.55) 2px 3px);animation:scan 9s linear infinite}',
-    '@keyframes scan{to{background-position:0 300px}}',
-    '.wrap{position:relative;z-index:1;max-width:560px;margin:0 auto;padding:34px 20px 60px}',
-    '.wrap::before,.wrap::after{content:"";position:absolute;width:42px;height:42px;pointer-events:none}',
-    '.wrap::before{top:12px;left:6px;border-top:2px solid var(--cy);border-left:2px solid var(--cy);filter:drop-shadow(0 0 6px var(--cy))}',
-    '.wrap::after{bottom:12px;right:6px;border-bottom:2px solid var(--mg);border-right:2px solid var(--mg);filter:drop-shadow(0 0 6px var(--mg))}',
-    '.card{position:relative;background:rgba(8,14,22,.72);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px);border:1px solid var(--line);padding:16px 18px;margin-bottom:16px;clip-path:polygon(0 14px,14px 0,calc(100% - 14px) 0,100% 14px,100% calc(100% - 14px),calc(100% - 14px) 100%,14px 100%,0 calc(100% - 14px));filter:drop-shadow(0 0 6px rgba(34,231,255,.18))}',
-    '.head{display:flex;justify-content:space-between;align-items:center}',
-    'h1{font-size:17px;margin:0 0 4px;letter-spacing:3px;text-transform:uppercase;color:var(--cy);text-shadow:0 0 8px rgba(34,231,255,.8),0 0 22px rgba(34,231,255,.35);animation:flick 6s infinite}',
-    '@keyframes flick{0%,96%,100%{opacity:1}97%{opacity:.5}98.5%{opacity:.85}}',
-    '.state{color:var(--mut);font-size:12px;letter-spacing:1px;text-transform:uppercase}',
-    '.dot{width:15px;height:15px;border-radius:50%;background:#1a2530;box-shadow:inset 0 0 5px #000,0 0 0 1px rgba(34,231,255,.2)}',
-    '.dot.on{background:var(--li);box-shadow:0 0 10px var(--li),0 0 24px var(--li);animation:pulse 1.8s ease-in-out infinite}',
-    '.dot.wait{background:var(--am);box-shadow:0 0 10px var(--am),0 0 24px var(--am);animation:pulse 1.05s ease-in-out infinite}',
-    '@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.7)}}',
-    '.grid{display:grid;grid-template-columns:1fr 1fr;gap:11px 18px}',
-    '.grid span{display:block;color:var(--mut);font-size:11px;letter-spacing:1.5px;text-transform:uppercase}',
-    '.grid b{font-weight:600;word-break:break-all;font-size:14px;color:var(--ink);text-shadow:0 0 7px rgba(34,231,255,.3)}',
-    '.note{margin-top:12px;color:var(--mut);font-size:12px;word-break:break-all;line-height:1.8}',
-    '.acts{display:flex;gap:10px;align-items:stretch;flex-wrap:wrap}',
-    // Machine switch: two buttons, one panel. Only one box can be up, so the inactive one is just a
-    // view -- picking it re-reads that machine\'s heartbeat and swaps the buttons onto it.
-    '.tabs{display:flex;gap:10px;padding:8px 10px}',
-    '.tabs button{flex:1 1 auto;min-width:0;padding:8px 4px;font-size:12px;letter-spacing:1.5px;opacity:.55}',
-    '.tabs button.on{opacity:1;background:rgba(34,231,255,.16);box-shadow:0 0 10px rgba(34,231,255,.35) inset}',
-    'button{flex:1 1 auto;min-width:120px;padding:12px 6px;border:1px solid var(--cy);background:rgba(34,231,255,.06);color:var(--cy);font:inherit;font-size:14px;font-weight:700;letter-spacing:2px;text-transform:uppercase;cursor:pointer;transition:.18s;clip-path:polygon(0 9px,9px 0,calc(100% - 9px) 0,100% 9px,100% calc(100% - 9px),calc(100% - 9px) 100%,9px 100%,0 calc(100% - 9px))}',
-    'button:hover{filter:drop-shadow(0 0 9px currentColor)}',
-    'button:active{transform:translateY(1px)}',
-    'button:disabled{opacity:.3;cursor:default;filter:none;background:transparent}',
-    '.ok{border-color:var(--li);color:var(--li);background:rgba(36,255,160,.06)}',
-    '.stop{border-color:var(--mg);color:var(--mg);background:rgba(255,46,136,.06)}',
-    '.term{border-color:var(--cy);color:var(--cy);background:rgba(34,231,255,.06)}',
-    '.log{display:flex;align-items:center;padding:0 12px;color:var(--mg);border:1px solid var(--mg);font-size:12px;letter-spacing:1px;text-transform:uppercase;text-decoration:none;white-space:nowrap;clip-path:polygon(0 9px,9px 0,100% 0,100% calc(100% - 9px),calc(100% - 9px) 100%,0 100%)}',
-    '.log:hover{filter:drop-shadow(0 0 8px var(--mg))}',
-    '.msg{min-height:20px;font-size:13px;color:var(--am);letter-spacing:.5px;padding:2px 4px;text-shadow:0 0 7px rgba(255,201,60,.4)}',
-    '.phase{display:flex;gap:12px;align-items:center}',
-    '.phase b{font-size:14px;color:var(--cy);letter-spacing:1px;text-transform:uppercase;text-shadow:0 0 7px rgba(34,231,255,.5)}',
-    '.mut{color:var(--mut);font-size:12px}',
-    '.spin{width:26px;height:26px;flex:none;border-radius:50%;border:3px solid rgba(34,231,255,.18);border-top-color:var(--cy);box-shadow:0 0 12px rgba(34,231,255,.5);animation:turn .9s linear infinite}',
-    '@keyframes turn{to{transform:rotate(360deg)}}',
-    '.bar{height:6px;border-radius:6px;background:rgba(0,0,0,.55);border:1px solid rgba(34,231,255,.18);overflow:hidden;margin:14px 0 10px}',
-    '.bar i{display:block;height:100%;width:36%;background:linear-gradient(90deg,transparent,var(--cy),var(--mg),transparent);box-shadow:0 0 14px var(--cy);animation:slide 2.2s linear infinite}',
-    '@keyframes slide{0%{transform:translateX(-120%)}100%{transform:translateX(320%)}}',
-    '.hint{color:var(--mut);font-size:12px;min-height:20px;letter-spacing:.5px}',
-    '.foot{display:flex;justify-content:space-between;align-items:center;gap:10px;color:var(--mut);font-size:11px;letter-spacing:1px;text-transform:uppercase;padding:2px 4px}',
+    'body{margin:0;color:var(--ink);font:14px/1.6 -apple-system,"Segoe UI","Segoe UI Variable",Roboto,"Microsoft YaHei",system-ui,sans-serif;-webkit-font-smoothing:antialiased;background:var(--bg)}',
+    '.wrap{max-width:620px;margin:0 auto;padding:28px 16px 48px}',
+    '.bar{display:flex;align-items:center;gap:12px;margin-bottom:16px}',
+    '.brand{font-size:15px;font-weight:600;letter-spacing:.2px}',
+    '.seg{margin-left:auto;display:flex;gap:2px;padding:2px;background:#eceef1;border-radius:7px}',
+    '.seg button{border:0;background:transparent;color:var(--mut);font:inherit;font-size:13px;padding:5px 12px;border-radius:5px;cursor:pointer}',
+    '.seg button:hover{color:var(--ink)}',
+    '.seg button.on{background:var(--card);color:var(--ink);font-weight:600;box-shadow:var(--shadow)}',
+    '.card{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:16px;margin-bottom:12px;box-shadow:var(--shadow)}',
+    '.stat{display:flex;align-items:center;gap:9px;padding-bottom:14px;margin-bottom:14px;border-bottom:1px solid var(--line)}',
+    '.stat-t{font-size:15px;font-weight:600}',
+    '.dot{width:9px;height:9px;border-radius:50%;background:#c6ccd4;flex:none}',
+    '.dot.on{background:var(--ok)}',
+    '.dot.wait{background:var(--wait);animation:blink 1.4s ease-in-out infinite}',
+    '@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}',
+    '.left{margin-left:auto;font-size:13px;color:var(--mut);font-variant-numeric:tabular-nums}',
+    '.left b{color:var(--ink);font-weight:600}',
+    '.grid{display:grid;grid-template-columns:1fr 1fr;gap:13px 20px}',
+    '.grid span{display:block;font-size:12px;color:var(--mut);margin-bottom:2px}',
+    '.grid b{font-weight:500;font-size:13px;word-break:break-all;font-family:ui-monospace,"Cascadia Mono",Consolas,"DejaVu Sans Mono",monospace}',
+    '.wait{margin:-4px 0 14px}',
+    '.wrow{display:flex;align-items:baseline;gap:10px;margin-bottom:9px}',
+    '.wrow b{font-size:13px;font-weight:600}',
+    '.mut{color:var(--mut);font-size:12px;margin-left:auto}',
+    '.bar2{height:3px;border-radius:3px;background:#eceef1;overflow:hidden}',
+    '.bar2 i{display:block;height:100%;width:34%;border-radius:3px;background:var(--acc);animation:slide 1.8s ease-in-out infinite}',
+    '@keyframes slide{0%{transform:translateX(-100%)}100%{transform:translateX(300%)}}',
+    '.hint{margin-top:10px;font-size:12px;color:var(--mut);min-height:18px;transition:opacity .4s}',
+    '.acts{display:grid;grid-template-columns:1fr 1fr;gap:9px;background:none;border:0;box-shadow:none;padding:0}',
+    'button{font:inherit;font-size:14px;font-weight:500;padding:10px 12px;border-radius:7px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;box-shadow:var(--shadow);transition:background .12s,border-color .12s}',
+    'button:hover:not(:disabled){background:#f8f9fb;border-color:#cfd5dd}',
+    'button:active:not(:disabled){background:#f0f2f5}',
+    'button:disabled{opacity:.45;cursor:default;box-shadow:none;background:#fafbfc}',
+    '.pri{background:var(--acc);border-color:var(--acc);color:#fff}',
+    '.pri:hover:not(:disabled){background:#2a63d6;border-color:#2a63d6}',
+    '.pri:active:not(:disabled){background:#2456bb}',
+    '.pri:disabled{background:#a9c1ef;border-color:#a9c1ef;color:#fff}',
+    '.dan{color:var(--bad)}',
+    '.dan:hover:not(:disabled){background:#fdf4f4;border-color:#eecaca}',
+    '.adv{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}',
+    '.adv summary{font-size:12px;color:var(--mut);cursor:pointer;list-style:none}',
+    '.adv summary::-webkit-details-marker{display:none}',
+    '.adv summary::before{content:"› ";display:inline-block;transition:transform .12s}',
+    '.adv[open] summary::before{transform:rotate(90deg)}',
+    '.note{margin-top:9px;color:var(--mut);font-size:12px;line-height:1.9;word-break:break-all;font-family:ui-monospace,Consolas,monospace}',
+    '.msg{min-height:20px;font-size:13px;color:var(--acc);padding:0 2px}',
+    '.msg.err{color:var(--bad)}',
+    '.foot{display:flex;align-items:center;gap:14px;color:var(--mut);font-size:12px;padding:2px}',
+    '.foot .links{margin-left:auto;display:flex;gap:14px}',
     '.foot a{color:var(--mut);text-decoration:none}',
-    '.foot a:hover{color:var(--cy);text-shadow:0 0 8px var(--cy)}',
-    '.login input{width:100%;padding:12px;margin-bottom:12px;border:1px solid var(--line);background:rgba(0,0,0,.5);color:var(--ink);font:inherit;font-size:15px;letter-spacing:2px}',
-    '.login input:focus{outline:none;border-color:var(--cy);box-shadow:0 0 0 1px var(--cy),0 0 16px rgba(34,231,255,.5)}',
-    '.login button{width:100%;min-width:0}',
+    '.foot a:hover{color:var(--acc)}',
+    '.login{max-width:340px;margin:12vh auto 0}',
+    '.login h1{font-size:16px;font-weight:600;margin:0 0 4px}',
     '.login p{color:var(--mut);font-size:12px;line-height:1.8;margin:0 0 16px}',
-    '.login a{color:var(--mg)}',
+    '.login a{color:var(--acc)}',
+    '.login input{display:block;width:100%;padding:9px 11px;margin-bottom:10px;border:1px solid var(--line);border-radius:7px;background:var(--card);color:var(--ink);font:inherit;font-size:14px}',
+    '.login input:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px var(--acc2)}',
+    '.login button{width:100%}',
+    '.login .pri{margin-bottom:0}',
   ].join('');
 }
 
@@ -660,61 +669,86 @@ function app() {
     "function esc(s){return (''+(s==null?'':s)).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})}",
     "function fmt(t){if(!t)return '-';var d=new Date(t);return isNaN(d)?t:d.toLocaleString('zh-CN',{hour12:false})}",
     "function post(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}).then(function(r){return r.json().then(function(j){return {code:r.status,j:j}})})}",
-    "function say(m){$('msg').textContent=m||''}",
-    "var HINTS=['GitHub 的免费 Windows 机器要先排队领用，这一步最慢','正在装 Git / cloudflared','隧道在握手，第一次连会慢一点','整条链路一般是 2-4 分钟','机器起来后按「打开桌面」或「打开终端」','趁这个空档可以去倒杯水','开机期间再按一次开机是没用的，按钮会自己变灰','桌面和终端都是 Cloudflare 直出，浏览器点开就行，不用装客户端'];",
-    "var waiting=false,wait0=0,hintI=0,hintAt=0;",
+    "function say(m,bad){var e=$('msg');e.textContent=m||'';e.className='msg'+(bad?' err':'')}",
+    // The box reports raw service states; the panel says one human thing about each and keeps the rest
+    // inside 详细信息, which is where the exact values still show for anyone debugging a boot.
+    "var DIAG={listening:'已就绪',running:'已连接','not-installed':'未安装','not-listening':'已停止','no-listener':'监听进程掉了','no-tunnel-url':'拿不到网址',up:'已接通','no-pass':'缺少口令','no-capkey':'缺少密钥','not-armed':'未启用','not-mounted':'未挂载',down:'已停止',booting:'正在启动'};",
+    "function cap(s){s=String(s||'');return s.indexOf('mounted ')===0?('已挂载 '+s.slice(8)):(DIAG[s]||s)}",
     // One view, two machines. M is the selected machine and every call carries it. The SSH link is the
     // same for both boxes because they share the tunnel and the hostname; the desktop link is not --
     // Windows goes to the fixed Access RDP app, Linux to the noVNC URL it publishes each boot.
     "var M='win',VURL='';",
-    "function setM(x){M=x;$('m-win').className=x==='win'?'on':'';$('m-linux').className=x==='linux'?'on':'';tick();}",
+    "var waiting=false,wait0=0,hintI=Math.floor(Math.random()*6),hintAt=0;",
+    // Booting takes a few minutes and there is nothing to do meanwhile, so the wait card talks. Plain
+    // facts about what is happening, one line at a time -- the timing numbers here are the real ones.
+    "var HINTS=[" +
+    "'第一次领用这台机器要排队，GitHub 分配慢，这一段最耗时'," +
+    "'正在装 Git 和 cloudflared，装完才连得上隧道'," +
+    "'隧道握手完成后，桌面和终端就都通了'," +
+    "'整条链路一般 2-4 分钟，Ubuntu 首次装桌面会到 5-8 分钟'," +
+    "'开机期间再按一次开机没有用，按钮会自己变灰'," +
+    "'这台机器每次开机都是全新的，重要文件记得先放进数据胶囊'," +
+    "'桌面和终端都是浏览器直连，不用装任何客户端'," +
+    "'机器起来后按「打开桌面」或「打开终端」，浏览器会先让你过一次登录'," +
+    "];",
+    "function nextHint(){hintI=(hintI+1)%HINTS.length;$('hint').textContent=HINTS[hintI];hintAt=Date.now()}",
+    "function setM(x){M=x;$('m-win').className=x==='win'?'on':'';$('m-linux').className=x==='linux'?'on':'';say('');tick();}",
     "$('m-win').onclick=function(){setM('win')};",
     "$('m-linux').onclick=function(){setM('linux')};",
     "setM('win');",
     "async function tick(){",
-    " var r;try{r=await(await fetch('/api/status?m='+M,{cache:'no-store'})).json()}catch(e){say('读取失败：'+e);return}",
+    " var r;try{r=await(await fetch('/api/status?m='+M,{cache:'no-store'})).json()}catch(e){say('状态读取失败，稍后自动重试',1);return}",
     " var v=r.vm||{},u=r.run||{},q=r.queue,alive=v&&v.alive,runLive=u&&u.live;",
     " var dot=$('dot'),st=$('state');",
     " var phase='';",
-    " if(alive){dot.className='dot on';st.textContent='运行中';}",
-    " else if(runLive){phase='boot';dot.className='dot wait';st.textContent=(u.event==='schedule'?'看门狗已接手，正在开机':'开机中（任务还在跑，还没上报）');}",
-    " else if(q&&q.action==='start'){phase='queue';dot.className='dot wait';st.textContent='排队开机，等下一次看门狗';}",
-    " else if(q&&q.action==='stop'){dot.className='dot wait';st.textContent='排队关机';}",
-    " else {dot.className='dot';st.textContent='已关机';}",
+    " if(alive){dot.className='dot on';st.textContent='运行中'}",
+    " else if(runLive){phase='boot';dot.className='dot wait';st.textContent='开机中'}",
+    " else if(q&&q.action==='start'){phase='queue';dot.className='dot wait';st.textContent='排队开机'}",
+    " else if(q&&q.action==='stop'){dot.className='dot wait';st.textContent='关机中'}",
+    " else {dot.className='dot';st.textContent='已关机'}",
     " waiting=!!phase;",
     " $('wait').style.display=phase?'':'none';",
-    " if(phase){$('ph').textContent=phase==='boot'?'正在开机：机器还没开始上报':'排队开机：等看门狗接手';wait0=(new Date(String(phase==='boot'?(u.created||''):(q.at||''))).getTime())||0;}",
-    " VURL=alive?(v.url||''):'';$('url').textContent=v.url||'-';",
+    " if(phase){$('ph').textContent=phase==='boot'?'正在准备系统，还没上报':'已排队，下一次检查最迟 5 分钟后开始';wait0=(new Date(String(phase==='boot'?(u.created||''):(q.at||''))).getTime())||0;}",
+    " else $('hint').textContent='';",
+    " VURL=alive?(v.url||''):'';$('url').textContent=(alive&&v.url)?v.url:'-';",
     " $('user').textContent=alive?(v.user||'-'):(M==='linux'?'root':'administrator');",
     " $('ends').textContent=fmt(v.ends);",
     " $('check').textContent=fmt(v.check);",
     " $('run').textContent=u?('#'+(u.number||'')+' '+u.status+(u.conclusion?' / '+u.conclusion:'')):'-';",
-    // The Linux box is a learning machine, so the panel hands over the plain-terminal form too: with
-    // the ProxyCommand entry in ~/.ssh/config this is an ordinary ssh, no browser involved.
-    " var extra=(M==='linux'&&alive)?('<br>本机终端：ssh root@ssh.kun9.ccwu.cc'):'';",
-    " $('note').innerHTML=(v.note?('状态：'+esc(v.note)+(v.restarts>0?(' · 隧道重连过 '+esc(v.restarts)+' 次'):'')):'')+(v.rdp?('<br>桌面 '+esc(v.rdp)):'')+(v.origin?('<br>终端 '+esc(v.origin)):'')+(v.capsule?('<br>胶囊 '+esc(v.capsule)):'')+(r.error?('<br>'+esc(r.error)):'')+extra;",
+    // The hostname is real even though the machine is not, so hand over the plain ssh form too: no
+    // browser involved, and it works from any terminal that can reach the tunnel.
+    " $('ssh').textContent=alive?('终端：ssh '+($('user').textContent)+'@ssh.kun9.ccwu.cc'):'';",
+    " var L=[];",
+    " if(v.note)L.push('上报内容：'+esc(v.note));",
+    " if(v.restarts)L.push('隧道重连：'+esc(v.restarts)+' 次');",
+    " if(v.rdp)L.push('桌面：'+esc(DIAG[v.rdp]||v.rdp));",
+    " if(v.origin)L.push('终端进程：'+esc(v.origin));",
+    " if(v.capsule)L.push('数据胶囊：'+esc(cap(v.capsule)));",
+    " if(v.named)L.push('隧道：'+esc(DIAG[v.named]||v.named));",
+    " if(r.error)L.push(esc(r.error));",
+    " $('note').innerHTML=L.join('<br>');",
     " $('log').href=u.url||'https://github.com/kunge520/kun9-compute/actions';",
     " $('bssh').disabled=!alive;",
     " $('brdp').disabled=!alive||(M==='linux'&&!VURL);",
     " $('bstart').disabled=!!(alive||runLive||(q&&q.action==='start'));",
     " $('bstop').disabled=!(alive||runLive)&&!(q&&q.action==='stop');",
-    " $('tok').textContent=r.has_token?'已配令牌（秒开机）':'配令牌（可选，秒开机）';",
-    " if(v.ends){var ms=new Date(v.ends).getTime()-Date.now();$('left').textContent=ms>0?Math.floor(ms/60000)+' 分 '+Math.floor(ms%60000/1000)+' 秒':'已到期';}",
-    " else $('left').textContent='-';",
-    " $('upd').textContent='刷新于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});",
+    " $('tok').textContent=r.has_token?'已配令牌':'配令牌（可选）';",
+    " if(v.ends&&alive){var ms=new Date(v.ends).getTime()-Date.now();$('left').innerHTML=ms>0?('剩余 <b>'+Math.floor(ms/60000)+' 分 '+String(Math.floor(ms%60000/1000)).padStart(2,'0')+' 秒</b>'):'<b>已到期</b>';}",
+    " else $('left').innerHTML=alive?'':'<b>每次开机都是全新机器</b>';",
+    " $('upd').textContent='更新于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});",
     "}",
     "$('bssh').onclick=function(){window.open(SSHBASE,'_blank')};",
-    "$('bstart').onclick=async function(){say('正在排队开机…');var x=await post('/api/queue',{action:'start',m:M});say(x.j.note||(x.j.ok?'已排队':'开机失败：'+x.code));setTimeout(tick,1500)};",
-    "$('bstop').onclick=async function(){if(!confirm('确定关机？这台机器上的未保存内容会丢。'))return;say('正在下发关机…');var x=await post('/api/queue',{action:'stop',m:M});say(x.j.note||(x.j.ok?'已下发':'关机失败：'+x.code));setTimeout(tick,1500)};",
+    "$('bstart').onclick=async function(){say('正在排队…');var x=await post('/api/queue',{action:'start',m:M});say(x.j.note||(x.j.ok?'已排队，马上开始':'开机失败：'+(x.j.note||x.code)),!x.j.ok);setTimeout(tick,1500)};",
+    "$('bstop').onclick=async function(){if(!confirm('确定关机？机器上的内容会全部清空，这是每次开机的正常结局。'))return;say('正在通知机器退出…');var x=await post('/api/queue',{action:'stop',m:M});say(x.j.note||(x.j.ok?'已下发，机器会在下一次检查时退出':'关机失败：'+(x.j.note||x.code)),!x.j.ok);setTimeout(tick,1500)};",
     "var SSHBASE='" + SSH_APP + "';",
     "var RDPURL='" + RDP_APP + '/rdp/' + RDP_VNET + '/' + RDP_TARGET + "/3389';",
     "$('brdp').onclick=function(){window.open(M==='linux'?VURL:RDPURL,'_blank')};",
     "setInterval(function(){",
     " if(!waiting)return;",
     " var s=wait0?Math.max(0,Math.round((Date.now()-wait0)/1000)):0;",
-    " $('elapsed').textContent=wait0?('已等 '+s+' 秒，整条链路一般 2-4 分钟'):'正在开机…';",
-    " if(!($('hint').textContent)){hintI=Math.floor(Math.random()*HINTS.length);$('hint').textContent=HINTS[hintI];hintAt=Date.now();return;}",
-    " if(Date.now()-hintAt>4000){hintAt=Date.now();hintI=(hintI+1)%HINTS.length;$('hint').textContent=HINTS[hintI];}",
+    " $('elapsed').textContent=wait0?('已等 '+s+' 秒'):'…';",
+    " if(!$('hint').textContent){$('hint').textContent=HINTS[hintI];hintAt=Date.now();}",
+    " else if(Date.now()-hintAt>5000)nextHint();",
     "},1000);",
     "async function loop(){await tick();setTimeout(loop,waiting?5000:15000)}",
     "loop();",

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Redeploy the vm-ctl panel Worker (https://ctl.kun9.ccwu.cc) from this repo's copy of the source.
 #
-# Two secrets are read from the machine and never committed: the Cloudflare API token and account
-# id (Desktop/密钥.txt, line 9 and line 5) and the panel password (密钥-换电脑拷走/console_key.txt,
-# which sits next to this repo in the working tree). Everything else here is public.
+# Two secrets are read from the machine and never committed: the Cloudflare API token and the panel
+# password. They live in ~/.qoder-cn/secrets -- the same directory every other script here reads, and
+# mirrored in the 数据胶囊 vault (aial:githubxuniji/vault) so a new computer gets them back with one
+# rclone pull instead of a hunt through Desktop. Everything else here is public.
 #
 # A deploy REPLACES the whole binding set, so every secret the Worker needs has to be listed in the
 # metadata below -- anything left out is gone the moment this runs. The OIDC signing key and its
-# client secret live next to the panel password (idp_jwk.json / idp_client_secret.txt), because the
+# client secret are next to the panel password (idp_jwk.json / idp_client_secret.txt), because the
 # browser-desktop login is minted by this Worker itself and losing that key means re-creating the
 # Access identity provider.
 #
@@ -20,14 +21,13 @@ set -u
 REPO=kunge520/kun9-compute
 WORKER=vm-ctl
 KV=4489efce29d9412b80e727a92d0410f2
+ACCT=0d5f4724a0cf54b406333fcf8e7a0b65
 CDATE=2026-10-01
 HERE=$(cd "$(dirname "$0")" && pwd)
-SECRETS="$HOME/Desktop/密钥.txt"
-VAULT="$HERE/../密钥-换电脑拷走"
-[ -d "$VAULT" ] || VAULT="$HOME/Desktop/github xuniji/密钥-换电脑拷走"
-[ -f "$SECRETS" ] || { echo "缺少 $SECRETS（Cloudflare API token 第 9 行、account id 第 5 行）"; exit 1; }
-for f in console_key.txt idp_jwk.json idp_client_secret.txt; do
-  [ -f "$VAULT/$f" ] || { echo "缺少 $VAULT/$f（面板口令 / 登录签名密钥 / 客户端密钥）"; exit 1; }
+VAULT="$HOME/.qoder-cn/secrets"
+[ -d "$VAULT" ] || { echo "缺少 $VAULT（先 rclone 从胶囊 vault/ 拉回来）"; exit 1; }
+for f in cf_maint_token.txt console_key.txt idp_jwk.json idp_client_secret.txt; do
+  [ -f "$VAULT/$f" ] || { echo "缺少 $VAULT/$f（API 令牌 / 面板口令 / 登录签名密钥 / 客户端密钥）"; exit 1; }
 done
 
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
@@ -49,8 +49,7 @@ echo "source=$(wc -c < "$D/vm-ctl.worker.js") bytes"
 # have to be escaped; the single-line files also lose their line endings here.
 esc() { tr -d '\r\n' < "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
-TOK=$(sed -n '9p' "$SECRETS" | tr -d '\r\n ')
-ACCT=$(sed -n '5p' "$SECRETS" | tr -d '\r\n ')
+TOK=$(tr -d '\r\n ' < "$VAULT/cf_maint_token.txt")
 printf 'header = "Authorization: Bearer %s"\n' "$TOK" > "$WD/.cf"
 # One line, deliberately: a backslash-newline inside single quotes is NOT a continuation in bash, it
 # is a literal backslash, and Cloudflare rejects the metadata part as unparsable JSON (code 10021).
