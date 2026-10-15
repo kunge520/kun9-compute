@@ -186,7 +186,10 @@ export default {
     }
 
     if (req.method === 'POST' && url.pathname === '/api/login') {
-      const form = await req.formData().catch(() => null);
+      // Only a real form post may go through formData(): reading the body that way consumes it, so a
+      // JSON login that tried it first would be left parsing an empty stream and refused as 口令不对.
+      const isForm = (req.headers.get('Content-Type') || '').indexOf('application/x-www-form-urlencoded') >= 0;
+      const form = isForm ? await req.formData().catch(() => null) : null;
       const body = form ? { p: form.get('p'), next: form.get('next') } : await readJson(req);
       if (!env.PANEL_KEY || String(body.p || '') !== String(env.PANEL_KEY)) {
         return send(page('口令不对', '登录'), 'text/html', 401);
