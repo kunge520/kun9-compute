@@ -256,7 +256,10 @@ export default {
         // one coming up must not be handed someone's old 关机.
         await env.STORE.delete(m.pw);
         const r = await gh(env, '/repos/' + REPO + '/actions/workflows/' + m.wf + '/dispatches', { method: 'POST', body: { ref: 'main' } });
-        if (r.status !== 204) return send(JSON.stringify({ ok: false, note: '即时触发失败：' + (r.note || r.status) }), 'application/json', 502);
+        if (r.status !== 204) return send(JSON.stringify({
+          ok: false,
+          note: '即时触发失败：' + ((r.status === 401 || r.status === 403) ? 'GitHub 不认这个令牌，去 /token 重贴一个' : (r.note || r.status)),
+        }), 'application/json', 502);
         // The flag holds busy() across the whole bring-up -- the runner handover, then the Linux box's
         // 5-8 minutes of apt -- and the machine's first /api/power poll is what clears it.
         await env.STORE.put(m.bt, '1', { expirationTtl: 1200 });
