@@ -2,7 +2,7 @@
 // kun9 VM control panel — one page that turns the GitHub free Windows runner on and off.
 //
 //
-// Power is credential-free by default: winterm.yml runs a 5-minute watchdog whose first job is to
+// Power is credential-free by default: winterm.yml runs a 15-minute watchdog whose first job is to
 // ask this Worker "is a start queued?" (/api/claim). If yes the Windows job runs; if no it finishes
 // in a few seconds. Stopping is the mirror image: the panel writes a stop flag here and the live VM
 // reads it on its next heartbeat (/api/power) and ends its own run. A fine-grained token pasted at
@@ -264,11 +264,15 @@ export default {
       // not worth an hour of a machine nobody asked for either), and a stop the current machine
       // never got to read must not kill the next one.
       await env.STORE.put(m.pw, JSON.stringify({ action: want, at: new Date().toISOString() }), { expirationTtl: 3600 });
-      if (want === 'start') await env.STORE.put(m.bt, '1', { expirationTtl: 900 });
-      // The Linux box pulls xfce4 + xrdp through apt on every boot, so its honest estimate is longer
-      // than the Windows one -- a wrong ETA reads as a hung machine.
+      // "booting" has to outlive the whole wait, not just the queue step: a start may not be picked up
+      // until the 15th minute, and the Linux box then spends 5-8 more minutes on apt before its first
+      // heartbeat. busy() reads this flag to stop a second machine being queued onto one still coming
+      // up, so a short TTL here would let exactly that through.
+      if (want === 'start') await env.STORE.put(m.bt, '1', { expirationTtl: 2700 });
+      // The Linux box pulls xfce4 + Xvnc/noVNC through apt on every boot, so its honest estimate is
+      // longer than the Windows one -- a wrong ETA reads as a hung machine.
       let note = want === 'start'
-        ? '已排队，看门狗最迟 5 分钟内接手，再等 ' + (m === MACH.linux ? '5-8' : '2-3') + ' 分钟装好环境'
+        ? '已排队，最迟 15 分钟内开始接手，再等 ' + (m === MACH.linux ? '5-8' : '2-3') + ' 分钟装好环境'
         : '已下发关机，机器最多 20 秒后自停';
 
       // Optional accelerator: one fine-grained token (this repo, Actions write) pasted at /token
@@ -553,7 +557,7 @@ function page(title, mode) {
     return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
       '<title>' + title + ' · 可选：即时开机</title><style>' + css() + '</style></head><body><div class="wrap">' +
       '<form class="card login" id="f"><h1>贴一个专用小令牌（可选）</h1>' +
-      '<p>不贴也能用：开机走 5 分钟一次的 Actions 看门狗。贴上以后开机变成即时触发，关机照旧靠机器自己退出。' +
+      '<p>不贴也能用：开机走 15 分钟一次的 Actions 检查。贴上以后开机变成即时触发，关机照旧靠机器自己退出。' +
       '<a href="https://github.com/settings/personal-access-tokens/new" target="_blank">在这里建令牌</a>：' +
       'Repository access 选 Only select repositories → kunge520/kun9-compute，Permissions 只勾 Actions: Read and write。' +
       '它只存在这个 Worker 里，页面永远不会把它回显出来。</p>' +
@@ -708,7 +712,7 @@ function app() {
     " else {dot.className='dot';st.textContent='已关机'}",
     " waiting=!!phase;",
     " $('wait').style.display=phase?'':'none';",
-    " if(phase){$('ph').textContent=phase==='boot'?'正在准备系统，还没上报':'已排队，下一次检查最迟 5 分钟后开始';wait0=(new Date(String(phase==='boot'?(u.created||''):(q.at||''))).getTime())||0;}",
+    " if(phase){$('ph').textContent=phase==='boot'?'正在准备系统，还没上报':'已排队，下一次检查最迟 15 分钟后开始';wait0=(new Date(String(phase==='boot'?(u.created||''):(q.at||''))).getTime())||0;}",
     " else $('hint').textContent='';",
     " VURL=alive?(v.url||''):'';$('url').textContent=(alive&&v.url)?v.url:'-';",
     " $('user').textContent=alive?(v.user||'-'):(M==='linux'?'root':'administrator');",

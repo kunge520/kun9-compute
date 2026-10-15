@@ -16,20 +16,22 @@ name: winterm
 # POWERING THE MACHINE FROM THE WEB PANEL, WITH NO CREDENTIAL ANYWHERE
 # ------------------------------------------------------------
 # `schedule` is the only Actions trigger that fires without a token, so the panel does not start
-# the VM: it puts a request in the Worker's KV and this 5-minute watchdog asks the panel
+# the VM: it puts a request in the Worker's KV and this 15-minute watchdog asks the panel
 # (POST /api/claim) whether one is queued. "start" -> the Windows job runs; anything else -> the
 # job finishes in a few seconds and GitHub bills nothing. The Worker refuses to hand out a start
 # while a heartbeat is fresh or a run is still live, so two machines can never overlap.
 # Stopping is the mirror image: the panel queues a stop, boot.ps1 reads it on its next heartbeat
 # and exits, which releases the runner. /api/claim and /api/power are deliberately the only
 # unauthenticated endpoints, and neither reveals anything.
+# The interval is deliberately lazy: this job runs around the clock whether or not anything is
+# queued, so 15 minutes keeps the daily run count down at the cost of a slightly longer wait.
 
 on:
   push:
     paths:
       - trigger.winterm
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch: {}
 
 permissions:

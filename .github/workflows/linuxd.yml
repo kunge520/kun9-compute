@@ -12,16 +12,18 @@ name: linuxd
 # and for the RDP desktop, CST_S3_* mount the capsule's github bucket under ~/capsule.
 #
 # Power works exactly like the Windows box: `schedule` is the only Actions trigger that fires without
-# a token, so this 5-minute watchdog asks the panel /api/claim?m=linux whether a start is queued. The
+# a token, so this 15-minute watchdog asks the panel /api/claim?m=linux whether a start is queued. The
 # Worker refuses to hand out a start while a heartbeat is fresh or a run is live -- on either machine,
 # because the two share one runner budget and one set of hostnames.
+# The interval is deliberately lazy: this job runs around the clock whether or not anything is queued,
+# and a queued start waiting a few extra minutes is a better trade than 3x the daily run count.
 
 on:
   push:
     paths:
       - trigger.linuxd
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch: {}
 
 permissions:
