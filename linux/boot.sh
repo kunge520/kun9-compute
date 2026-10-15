@@ -69,9 +69,13 @@ StartTunnel() {
   local cf="$HOME/cf"
   mkdir -p "$cf"
   if [ ! -x "$cf/cloudflared" ]; then
-    curl -sL --max-time 180 -o "$cf/cf.tgz" \
-      https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.tgz || return 1
-    tar -xzf "$cf/cf.tgz" -C "$cf" cloudflared || return 1
+    # There is no cloudflared-linux-amd64.tgz -- the release ships the bare binary -- and without -f a
+    # 404 page gets saved, chmod'ed +x and then "runs" as a silent no-op, which is exactly how a
+    # mis-named asset reads months later. So: fail on a bad status and check for an ELF header.
+    curl -sfL --max-time 180 -o "$cf/cloudflared" \
+      https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+      || { CFPG='cf-dl-fail'; return 1; }
+    head -c 4 "$cf/cloudflared" | grep -q ELF || { CFPG='cf-dl-fail'; return 1; }
     chmod +x "$cf/cloudflared"
   fi
   # --protocol http2: the QUIC path is blocked on some runner networks and http2 always works -- it is
