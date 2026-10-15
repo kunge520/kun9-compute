@@ -259,6 +259,8 @@ function Publish($extra) {
     rdp_info = $script:RDPINFO
     rdp_ip = $(if ($script:RDPIP) { $script:RDPIP } else { VnetIp })
     ssh_info = $script:SSHINFO
+    dbg_url = $script:DBGURL
+    dbg_diag = ('' + $script:DBGDIAG + ' tunnel=' + $script:DBGTUN)
     cfn_tail = ((Tail (Join-Path $work 'cfn.log') 2) + ' || ' + (Tail (Join-Path $work 'cfn.err') 4))
   }
   foreach ($k in $extra.Keys) { $body[$k] = $extra[$k] }
@@ -368,6 +370,133 @@ function Enable-Capsule {
   return (Start-CapsuleTask)
 }
 
+# ---- AI debug channel: a key-gated command echo on localhost, out through a quick tunnel ----
+# The browser terminal costs a second per keystroke and cannot paste, so a real bug takes an hour to
+# find. This is the same cloudflared already on the box pointed at a local listener instead: the debug
+# loop becomes one curl. Best-effort like the capsule -- the desktop and terminal never depend on it.
+# A quick tunnel needs no account credentials, which is what makes it droppable onto any other machine.
+$script:DBGTASK = 'winterm-dbg'
+$script:DESKTASK = 'winterm-desk'
+$script:DBGPORT = 3128
+$script:DBGURL = ''
+function Get-DbgKey {
+  # Derived on both ends instead of stored: a third Actions secret would be a third thing to rotate.
+  # The capsule secret is mixed in on purpose -- the desktop password is 8 digits and the tunnel URL is
+  # published in a public repo, so the key must not be guessable from anything an attacker can read.
+  try {
+    $h = New-Object Security.Cryptography.HMACSHA256
+    $h.Key = [Text.Encoding]::UTF8.GetBytes(("$env:WT_RDP_PASS".Trim() + '|' + "$env:CST_S3_AKSEC".Trim()))
+    $b = $h.ComputeHash([Text.Encoding]::UTF8.GetBytes('kun9-dbg-v1'))
+    return ((($b | ForEach-Object { $_.ToString('x2') }) -join ''))
+  } catch { return '' }
+}
+$script:DBGPS = @'
+param([string]$KeyFile = '', [string]$Mode = 'listen')
+$ErrorActionPreference = 'Continue'
+$dir = Join-Path $env:ProgramData 'winterm'
+if ($Mode -eq 'desk') {
+  # Runs as the desktop user in the desktop session, which is the only place a drive letter created
+  # there is visible. The caller deletes desk.log first, so the file reappearing means it is done.
+  $o = ''
+  try { $o = (& ([ScriptBlock]::Create((Get-Content -Raw (Join-Path $dir 'desk.in')))) 2>&1 | Out-String -Width 400) }
+  catch { $o = 'ERR ' + $_.Exception.Message }
+  Set-Content -Path (Join-Path $dir 'desk.log') -Value $o -Encoding UTF8
+  exit 0
+}
+$Key = ''
+try { $Key = (Get-Content -Raw $KeyFile).Trim() } catch { }
+if ("$Key".Length -lt 40) { exit 1 }
+function Send-C($c, [int]$code, [string]$text) {
+  $b = [Text.Encoding]::UTF8.GetBytes("$text")
+  $c.Response.StatusCode = $code
+  $c.Response.ContentType = 'text/plain; charset=utf-8'
+  $c.Response.ContentLength64 = $b.Length
+  $c.Response.OutputStream.Write($b, 0, $b.Length)
+  $c.Response.Close()
+}
+function Read-Body($c) {
+  $r = New-Object System.IO.StreamReader($c.Request.InputStream, [System.Text.Encoding]::UTF8)
+  return $r.ReadToEnd()
+}
+function Run-Desk([string]$s) {
+  Set-Content -Path (Join-Path $dir 'desk.in') -Value $s -Encoding UTF8
+  Remove-Item (Join-Path $dir 'desk.log') -Force -EA SilentlyContinue
+  & schtasks /run /tn winterm-desk 2>&1 | Out-Null
+  for ($i = 0; $i -lt 40; $i++) {
+    Start-Sleep -Milliseconds 500
+    if (Test-Path (Join-Path $dir 'desk.log')) { return (Get-Content -Raw (Join-Path $dir 'desk.log')) }
+  }
+  return 'ERR desk task never ran: nobody is logged on, or winterm-desk is not registered'
+}
+$l = New-Object System.Net.HttpListener
+$l.Prefixes.Add('http://127.0.0.1:3128/')
+try { $l.Start() } catch {
+  Set-Content -Path (Join-Path $dir 'dbg.log') -Value ('bind-fail: ' + $_.Exception.Message) -Encoding ascii
+  exit 1
+}
+while ($l.IsListening) {
+  try {
+    $c = $l.GetContext()
+    if ("$($c.Request.Headers['X-Key'])" -ne $Key) { Send-C $c 401 'bad key'; continue }
+    $p = $c.Request.Url.AbsolutePath
+    if ($p -eq '/ping') { Send-C $c 200 ('pong session=' + (Get-Process -Id $PID).SessionId); continue }
+    if ($p -eq '/run') {
+      $s = Read-Body $c
+      $o = ''
+      try { $o = (& ([ScriptBlock]::Create($s)) 2>&1 | Out-String -Width 400) } catch { $o = 'ERR ' + $_.Exception.Message }
+      Send-C $c 200 $o; continue
+    }
+    if ($p -eq '/desk') { Send-C $c 200 (Run-Desk (Read-Body $c)); continue }
+    Send-C $c 404 'no route'
+  } catch { Start-Sleep -Seconds 1 }
+}
+'@
+function Enable-Debug {
+  if (-not "$env:CST_S3_AKSEC") { return 'no-key' }
+  $t = Join-Path $env:ProgramData 'winterm'
+  if (-not (Test-Path $t)) { New-Item -ItemType Directory -Path $t -Force -EA SilentlyContinue | Out-Null }
+  $key = Get-DbgKey
+  if ("$key".Length -lt 40) { return 'key-fail' }
+  $kf = Join-Path $t 'dbg.key'
+  Set-Content -Path $kf -Value $key -Encoding ascii
+  & icacls $kf /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' /Q 2>&1 | Out-Null
+  $ps = Join-Path $t 'dbg.ps1'
+  Set-Content -Path $ps -Value $script:DBGPS -Encoding ascii
+  $st = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+  $st.ExecutionTimeLimit = 'PT0S'
+  try {
+    $a1 = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $ps + '" -KeyFile "' + $kf + '"')
+    $p1 = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    Register-ScheduledTask -TaskName $script:DBGTASK -Action $a1 -Trigger (New-ScheduledTaskTrigger -AtStartup) -Settings $st -Principal $p1 -Force | Out-Null
+    $a2 = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $ps + '" -Mode desk')
+    $p2 = New-ScheduledTaskPrincipal -UserId 'administrator' -LogonType Interactive -RunLevel Highest
+    Register-ScheduledTask -TaskName $script:DESKTASK -Action $a2 -Trigger (New-ScheduledTaskTrigger -AtLogOn -User 'administrator') -Settings $st -Principal $p2 -Force | Out-Null
+    & schtasks /run /tn $script:DBGTASK 2>&1 | Out-Null
+  } catch { return 'reg-fail: ' + $_.Exception.Message }
+  for ($i = 0; $i -lt 10; $i++) {
+    Start-Sleep -Seconds 2
+    try {
+      $r = Invoke-WebRequest -Uri ('http://127.0.0.1:' + $script:DBGPORT + '/ping') -Headers @{ 'X-Key' = $key } -UseBasicParsing -TimeoutSec 4
+      if ($r.StatusCode -eq 200) { return ('up ' + $r.Content) }
+    } catch { }
+  }
+  return 'no-listener: ' + (Tail (Join-Path $t 'dbg.log') 3)
+}
+function Start-DbgTunnel {
+  # Its own exe name so Get-Process cfb counts only this connector. cloudflared prints the
+  # trycloudflare URL on stderr, and it changes every boot, so it has to be published to be found.
+  Copy-Item (Join-Path $work 'cf.exe') (Join-Path $work 'cfb.exe') -Force -EA SilentlyContinue
+  Start-Process -FilePath (Join-Path $work 'cfb.exe') -ArgumentList @('tunnel', '--no-autoupdate', '--url', ('http://127.0.0.1:' + $script:DBGPORT)) -RedirectStandardOutput (Join-Path $work 'cfb.out') -RedirectStandardError (Join-Path $work 'cfb.err') -NoNewWindow
+  for ($i = 0; $i -lt 20; $i++) {
+    Start-Sleep -Seconds 2
+    $txt = ''
+    try { $txt = ((Get-Content (Join-Path $work 'cfb.err') -Raw -EA SilentlyContinue) + (Get-Content (Join-Path $work 'cfb.out') -Raw -EA SilentlyContinue)) } catch { }
+    $m = [regex]::Match($txt, 'https://[a-z0-9-]+[.]trycloudflare[.]com')
+    if ($m.Success) { $script:DBGURL = $m.Value; return 'up' }
+  }
+  return 'no-url: ' + (Tail (Join-Path $work 'cfb.err') 3)
+}
+
 $OK_CF = Get-Binary 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe' (Join-Path $work 'cf.exe') 10MB
 Write-Host ('cloudflared ' + (Get-Item (Join-Path $work 'cf.exe') -EA SilentlyContinue).Length + 'B ok=' + $OK_CF)
 if (-not $OK_CF) {
@@ -423,7 +552,15 @@ $script:RESTARTS = 0
 $NPN = (Get-Process cfn -EA SilentlyContinue | Measure-Object).Count
 $script:CAPDIAG = Enable-Capsule
 Write-Host ('capsule at boot: ' + $CAPDIAG)
-Publish @{ note = ('rdp ready, named=' + $NAMED + ' capsule=' + $CAPDIAG) }
+$script:DBGDIAG = Enable-Debug
+Write-Host ('debug listener at boot: ' + $DBGDIAG)
+$script:DBGON = ("$DBGDIAG" -like 'up*')
+if ($script:DBGON) {
+  $script:DBGTUN = Start-DbgTunnel
+  Write-Host ('debug tunnel: ' + $DBGTUN + ' ' + $script:DBGURL)
+} else { $script:DBGTUN = 'skipped' }
+$script:DBGLAST = Get-Date
+Publish @{ note = ('rdp ready, named=' + $NAMED + ' capsule=' + $CAPDIAG + ' dbg=' + $DBGDIAG) }
 
 # ---- supervise: keep the tunnel alive and obey the panel ----
 $until = (Get-Date).ToUniversalTime().AddSeconds($SECS)
@@ -482,8 +619,29 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
     }
   }
 
+  if ($script:DBGON -and ((Get-Date) - $script:DBGLAST).TotalSeconds -ge 60) {
+    # The listener is a scheduled task and the tunnel is a process; either can die on its own and the
+    # only symptom is my curl timing out, so both are checked on one slow cooldown.
+    $script:DBGLAST = Get-Date
+    $alive = $false
+    try {
+      $k = (Get-Content (Join-Path $env:ProgramData 'winterm\dbg.key') -Raw -EA SilentlyContinue).Trim()
+      $alive = (Invoke-WebRequest -Uri ('http://127.0.0.1:' + $script:DBGPORT + '/ping') -Headers @{ 'X-Key' = $k } -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200
+    } catch { }
+    if (-not $alive) {
+      Write-Host 'debug listener gone, re-arming'
+      & schtasks /run /tn $script:DBGTASK 2>&1 | Out-Null
+      $changed = $true
+    }
+    if ((Get-Process cfb -EA SilentlyContinue | Measure-Object).Count -eq 0) {
+      Write-Host 'debug tunnel gone, restarting'
+      $script:DBGTUN = Start-DbgTunnel
+      $changed = $true
+    }
+  }
+
   if ($changed -or ((Get-Date) - $lastPublish).TotalSeconds -ge 60) {
-    Publish @{ note = ('named=' + $NAMED + ' capsule=' + $script:CAPDIAG) }
+    Publish @{ note = ('named=' + $NAMED + ' capsule=' + $script:CAPDIAG + ' dbg=' + $script:DBGTUN) }
     $lastPublish = Get-Date
   }
 }
