@@ -204,9 +204,10 @@ function Enable-Rdp {
 }
 function Enable-Ssh {
   # The browser terminal is Cloudflare's clientless SSH now: the tunnel carries ssh.kun9.ccwu.cc ->
-  # ssh://localhost:22, so the VM only has to serve sshd. The browser forces the SSH username to the
-  # Access email prefix, so the account must be named after it; its password is the same fixed one
-  # the RDP form uses. Idempotent, run every boot.
+  # ssh://localhost:22, so the VM only has to serve sshd. Which username Cloudflare sends is set by
+  # the winterm-ssh Access policy's connection_rules (usernames = administrator, email alias off),
+  # so the terminal and the desktop share one account instead of needing a second one named after an
+  # email prefix. Its password is the same fixed one the RDP form uses. Idempotent, run every boot.
   $out = @()
   try {
     $cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' -EA SilentlyContinue | Select-Object -First 1
@@ -376,9 +377,9 @@ if (-not $OK_CF) {
 
 # ---- desktop credentials ----
 $FIXED = "$env:WT_RDP_PASS".Trim()
-# Clientless SSH ignores whatever the form types and logs in as the Access email prefix, so the
-# Windows account it needs is named after the owner's address (645478520@qq.com) rather than chosen.
-$SSHUSER = '645478520'
+# One account for both doors: the Access policy pins the terminal's SSH username to this name, so
+# there is no longer an account named after an email prefix.
+$SSHUSER = 'administrator'
 $OPENED = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 $ENDS = (Get-Date).ToUniversalTime().AddSeconds($SECS).ToString('yyyy-MM-ddTHH:mm:ssZ')
 
