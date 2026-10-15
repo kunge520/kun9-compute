@@ -249,6 +249,18 @@ Publish 'booting: ssh+tunnel+dbg up, desktop installing'
 # heartbeat refresh, no panel stop). Wait on the two installs by pid.
 wait "$RDPJOB"; wait "$CAPJOB"
 
+# A background job cannot set a variable in its parent shell, so RDPG/CAPG still hold their initial
+# values no matter what the installs did. Read the truth back from the system instead. A diagnosis
+# that came from the install itself (apt-fail, no-key, rclone-missing) is kept -- only the two
+# never-ran/stale-mounted states get rewritten.
+Probe() {
+  if ss -tln 2>/dev/null | grep -q ':3389 '; then RDPG='listening'
+  elif [ "$RDPG" = listening ]; then RDPG='not-listening'; fi
+  if mountpoint -q "$HOME/capsule" 2>/dev/null; then CAPG="mounted $HOME/capsule"
+  elif [ "$CAPG" = not-armed ] || [ "$CAPG" = "mounted $HOME/capsule" ]; then CAPG='not-mounted'; fi
+}
+Probe
+
 Publish "desktop=$RDPG capsule=$CAPG dbg=$DBGPG"
 log "reachable: https://ssh.kun9.ccwu.cc  (runner / \$WT_RDP_PASS)  ttl=${MIN}m"
 
@@ -294,6 +306,7 @@ while [ "$(date -u +%s)" -lt "$END_TS" ]; do
 
   if [ $(( $(date -u +%s) - LASTP )) -ge 60 ] || [ "$CHANGED" = 1 ]; then
     LASTP=$(date -u +%s)
+    Probe
     Publish "desktop=$RDPG capsule=$CAPG dbg=$DBGPG"
   fi
 done
