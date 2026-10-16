@@ -337,7 +337,10 @@ EnableDesktop() {
 # locks and its cache the moment the mount stalls, which wedges the browser exactly the way a stalled
 # disk wedges `ls`.
 BrowserLauncher() {
-  local d="$HOME/cf" w="$d/kun9-browser" f
+  local d="$HOME/cf" f
+  # Two statements, not one: bash expands the words of a single `local` before it assigns any of them, so
+  # `local d=... w="$d/..."` would quietly make w point at /kun9-browser.
+  local w="$d/kun9-browser"
   mkdir -p "$d"
   cat >"$w" <<'LAUNCHER'
 #!/bin/bash
@@ -379,6 +382,9 @@ Icon=web-browser
 Terminal=false
 Categories=Network;WebBrowser;
 ENTRY
+  # 644, because tee would otherwise leave the file world-writable and its Exec is what root's menu click
+  # runs.
+  sudo chmod 644 /usr/share/applications/kun9-browser.desktop
   # The image's own browser entries sit in the menu right next to this one -- Firefox, Chrome and Edge
   # all show -- and every click on them lands on a refusal, so they are hidden: one working entry beats
   # three where only one answers. NoDisplay goes after the first Type= line, which is inside the main
