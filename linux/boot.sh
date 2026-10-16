@@ -25,6 +25,13 @@
 
 set +e
 cd "$GITHUB_WORKSPACE" || exit 1
+# Run from a copy outside the checkout. SyncHead below resets this worktree to origin/main, and bash
+# reads a script file as it goes: a boot.sh rewritten mid-run by a push made while the box was live would
+# be executed from the wrong byte offset once the supervise loop ended, which looks like a broken machine
+# rather than like an edit. (boot.ps1 does not have this problem: PowerShell parses a whole script first.)
+if [ -z "${LINUXD_SELF:-}" ] && cp "$0" /tmp/linuxd-boot.sh 2>/dev/null; then
+  exec env LINUXD_SELF=/tmp/linuxd-boot.sh bash /tmp/linuxd-boot.sh
+fi
 
 CTL='https://ctl.kun9.ccwu.cc'
 REF="${GITHUB_REF_NAME:-main}"
@@ -54,6 +61,9 @@ RESTARTS=0
 PUB=''
 NOTEG='ssh up'
 DESKG='not-installed'
+# Read back from a file like R2G below: the launcher is installed inside the desktop starter, which runs
+# as a background job and cannot set a variable here.
+BRG='pending'
 # The disk's state is probed from the mount table, never trusted from a variable: the mount runs as
 # root in a background job, so it cannot report back into this shell. See Probe().
 R2DIR=/root/drive
@@ -126,12 +136,26 @@ StartTunnel() {
 # already holds as secrets, so no third credential is introduced. A quick tunnel needs no account
 # permissions at all, which is what makes this droppable on any machine; its random URL goes into the
 # heartbeat, exactly like the Windows box publishes dbg_url.
+#
+# Two things here are load-bearing, and losing either one costs the channel: output goes to temp files
+# and never to pipes, because a pipe stays open for every descendant of the script, so one command that
+# leaves something running (a browser, a mount) blocks the read -- and `timeout` cannot save it, since
+# Python's own timeout only interrupts the first wait and then waits again with no deadline at all. The
+# server is threaded for the same reason: a request that does get stuck must not silence the box.
 StartDbgListener() {
   [ -z "$WT_RDP_PASS" ] && { DBGPG='no-pass'; return 1; }
   [ -z "$CST_S3_AKSEC" ] && { DBGPG='no-key'; return 1; }
+  # Drop whoever holds the port first. A wedged listener cannot be replaced by starting a new one beside
+  # it: the old process keeps the port, the new one fails to bind, and the supervise loop then restarts
+  # forever while the box stays silent. The pid comes from the socket, so no credential has to appear in
+  # a match pattern.
+  local old
+  old=$(ss -tlnp 2>/dev/null | grep ":$DBGPORT " | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1)
+  [ -n "$old" ] && { kill "$old" 2>/dev/null; sleep 1; }
+  mkdir -p "$HOME/cf"
   nohup python3 - "$WT_RDP_PASS" "$CST_S3_AKSEC" "$DBGPORT" <<'PY' >"$HOME/cf/dbg.log" 2>&1 &
-import hmac, hashlib, subprocess, sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import hmac, hashlib, os, signal, subprocess, sys, tempfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 key = hmac.new((sys.argv[1] + '|' + sys.argv[2]).encode(), b'kun9-dbg-v1', hashlib.sha256).hexdigest()
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -139,21 +163,38 @@ class H(BaseHTTPRequestHandler):
         b = text.encode('utf-8', 'replace')
         self.send_response(code); self.send_header('Content-Length', str(len(b)))
         self.send_header('Content-Type', 'text/plain; charset=utf-8'); self.end_headers(); self.wfile.write(b)
+    def shell(self, script):
+        out, err = tempfile.TemporaryFile(mode='w+'), tempfile.TemporaryFile(mode='w+')
+        try:
+            p = subprocess.Popen(['bash', '-c', script], stdin=subprocess.DEVNULL,
+                                 stdout=out, stderr=err, text=True, start_new_session=True)
+            try:
+                rc = p.wait(timeout=180)
+            except Exception:
+                # The group, not just the shell: the command that hung is usually waiting on its own
+                # children, and killing only the parent would leave them holding the mount or the port.
+                try: os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                except Exception: pass
+                try: p.wait(timeout=10)
+                except Exception: pass
+                return 'timeout: killed after 180s\n'
+            out.seek(0); err.seek(0)
+            return out.read() + err.read() + 'exit=%s\n' % rc
+        except Exception as e:
+            return 'exec-fail: %s\n' % e
+        finally:
+            out.close(); err.close()
     def do_GET(self):
         if not hmac.compare_digest(self.headers.get('X-Key', ''), key): return self.send(403, 'denied')
-        u = subprocess.run(['bash','-c','echo user=$(whoami) host=$(hostname) drives=$(ls / | tr "\\n" " ")'],
-                           capture_output=True, text=True).stdout.strip()
+        u = self.shell('echo user=$(whoami) host=$(hostname) drives=$(ls / | tr "\\n" " ")').strip()
         self.send(200, 'pong ' + u)
     def do_POST(self):
         if not hmac.compare_digest(self.headers.get('X-Key', ''), key): return self.send(403, 'denied')
         n = int(self.headers.get('Content-Length', 0) or 0)
-        script = self.rfile.read(n).decode('utf-8', 'replace')
-        try:
-            p = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=180)
-            self.send(200, (p.stdout or '') + (p.stderr or '') + 'exit=%d\n' % p.returncode)
-        except Exception as e:
-            self.send(500, 'exec-fail: %s\n' % e)
-HTTPServer(('127.0.0.1', int(sys.argv[3])), H).serve_forever()
+        self.send(200, self.shell(self.rfile.read(n).decode('utf-8', 'replace')))
+class S(ThreadingHTTPServer):
+    daemon_threads = True
+S(('127.0.0.1', int(sys.argv[3])), H).serve_forever()
 PY
   sleep 2
   curl -s --max-time 4 -o /dev/null "http://127.0.0.1:$DBGPORT/" && return 0
@@ -265,6 +306,8 @@ EnableDesktop() {
     sleep 1
   done
   ss -tln 2>/dev/null | grep -q ":$VNCPORT " || { DESKG='no-xvnc'; return 1; }
+  # Before the session starts, so the menu already has the entry when the desktop first draws.
+  BrowserLauncher
   pgrep -x xfce4-session >/dev/null || sudo bash -c \
     "nohup env DISPLAY=:1 HOME=/root USER=root XDG_RUNTIME_DIR=/run/user/0 startxfce4 >/root/wm.log 2>&1 &"
   pgrep -x websockify >/dev/null || nohup /usr/bin/websockify --web=/usr/share/novnc \
@@ -275,6 +318,90 @@ EnableDesktop() {
   done
   DESKG='no-web'
   return 1
+}
+
+# ---- the desktop's browser ----
+# The image does ship Chrome, Chromium, Edge and Firefox, so a desktop with no working browser is not a
+# missing package: each of them refuses to start when the desktop belongs to root. Chrome stops at
+# "Running as root without --no-sandbox is not supported" and the Firefox wrapper stops at
+# "$XDG_RUNTIME_DIR is /run/user/1001 which is owned by runner", because sudo hands over the caller's HOME
+# and runtime dir. One launcher sets the environment this desktop actually has and starts whichever binary
+# is present, Chrome first, so no menu click can reach a refusal again.
+#
+# --no-sandbox is what lets a root Chrome start at all, and it is a real cost, not a free flag: a page
+# that gets outside the Chrome sandbox then owns this box as root. The box holds nothing of his -- his
+# files are on the R2 mount, which the browser never writes to -- and it is destroyed at the end of every
+# run, so the exposure ends with the run.
+#
+# The profile stays on local disk: /root/drive is rclone, and a browser profile on a FUSE mount loses its
+# locks and its cache the moment the mount stalls, which wedges the browser exactly the way a stalled
+# disk wedges `ls`.
+BrowserLauncher() {
+  local d="$HOME/cf" w="$d/kun9-browser" f
+  mkdir -p "$d"
+  cat >"$w" <<'LAUNCHER'
+#!/bin/bash
+# Installed by linux/boot.sh -- see BrowserLauncher there for why this exists.
+# --probe answers which browser a click would start and opens nothing, so the boot script reports the
+# same truth the menu gives.
+export HOME=/root USER=root DISPLAY="${DISPLAY:-:1}" XDG_RUNTIME_DIR=/run/user/0
+mkdir -p /run/user/0 /root/browser-profile 2>/dev/null
+probe=0
+[ "${1:-}" = --probe ] && { probe=1; shift; }
+a=()
+[ -n "${1:-}" ] && a=("$1")
+for c in /usr/bin/google-chrome-stable /usr/bin/google-chrome /usr/bin/chromium /usr/bin/chromium-browser; do
+  [ -x "$c" ] || continue
+  [ "$probe" = 1 ] && { echo chrome; exit 0; }
+  nohup "$c" --no-sandbox --no-first-run --no-default-browser-check \
+    --user-data-dir=/root/browser-profile "${a[@]}" >/root/browser.log 2>&1 &
+  exit 0
+done
+for c in /usr/lib/firefox/firefox /usr/bin/firefox; do
+  [ -x "$c" ] || continue
+  [ "$probe" = 1 ] && { echo firefox; exit 0; }
+  nohup "$c" -no-remote "${a[@]}" >/root/browser.log 2>&1 &
+  exit 0
+done
+[ "$probe" = 1 ] && { echo missing; exit 0; }
+echo no-browser-installed >/root/browser.log
+LAUNCHER
+  chmod 755 "$w"
+  sudo install -m 755 "$w" /usr/local/bin/kun9-browser || { echo install-fail >"$d/br.diag"; return 1; }
+  sudo tee /usr/share/applications/kun9-browser.desktop >/dev/null <<'ENTRY'
+[Desktop Entry]
+Type=Application
+Name=Web Browser
+GenericName=Browser
+Comment=Browse the web on this desktop
+Exec=/usr/local/bin/kun9-browser %U
+Icon=web-browser
+Terminal=false
+Categories=Network;WebBrowser;
+ENTRY
+  # The image's own browser entries sit in the menu right next to this one -- Firefox, Chrome and Edge
+  # all show -- and every click on them lands on a refusal, so they are hidden: one working entry beats
+  # three where only one answers. NoDisplay goes after the first Type= line, which is inside the main
+  # entry; google-chrome.desktop has more sections and an append would land in the wrong one.
+  for f in /usr/share/applications/firefox.desktop /usr/share/applications/google-chrome.desktop \
+           /usr/share/applications/microsoft-edge.desktop /usr/share/applications/chromium-browser.desktop; do
+    [ -f "$f" ] || continue
+    sudo grep -q '^NoDisplay=' "$f" || \
+      sudo sed -i '0,/^Type=Application/s//Type=Application\nNoDisplay=true/' "$f"
+  done
+  # Written directly instead of through xdg-settings, which needs a session bus and would leave a dbus
+  # daemon running behind it. Nothing exists at this path on a runner, so there is no section to merge.
+  sudo mkdir -p /root/.config
+  [ -f /root/.config/mimeapps.list ] || sudo tee /root/.config/mimeapps.list >/dev/null <<'MIME'
+[Default Applications]
+x-scheme-handler/http=kun9-browser.desktop
+x-scheme-handler/https=kun9-browser.desktop
+www-browser=kun9-browser.desktop
+MIME
+  BRG=$(bash "$w" --probe 2>/dev/null)
+  echo "${BRG:-missing}" >"$d/br.diag"
+  log "browser launcher -> ${BRG:-missing}"
+  [ -n "$BRG" ] && [ "$BRG" != missing ]
 }
 
 # ---- heartbeat: same file shape the panel already reads for winterm ----
@@ -349,10 +476,19 @@ Probe() {
   # ran it in a background job. That job only leaves its reason in a file, which is what R2G reads.
   R2G=$(cat "$HOME/cf/r2.diag" 2>/dev/null || echo pending)
   [ "$R2G" = mounted ] && { timeout 10 sudo mountpoint -q "$R2DIR" 2>/dev/null || R2G='unmounted'; }
+  BRG=$(cat "$HOME/cf/br.diag" 2>/dev/null || echo pending)
+  # The channel is judged on the URL the heartbeat publishes, not on the local port: a port that answers
+  # behind a dead tunnel is not a channel anyone can use, and the key-gated 403 proves both halves without
+  # putting a secret in this shell. Nothing else ever rewrote DBGPG, so one failed poll used to leave a
+  # working box reported as having no debug channel for the rest of the run.
+  case "$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' "$DBGURL/" 2>/dev/null)" in
+    200|401|403) DBGPG='up' ;;
+    000) [ "$DBGPG" = up ] && DBGPG='tunnel-dead' ;;
+  esac
 }
 Probe
 
-Publish "desktop=$DESKG disk=$R2G dbg=$DBGPG"
+Publish "desktop=$DESKG disk=$R2G dbg=$DBGPG browser=$BRG"
 log "reachable: ssh root@ssh.kun9.ccwu.cc  desktop=${DESKURL:-none}  disk=$R2DIR  ttl=${MIN}m"
 
 # ---- supervise: keep the tunnel alive, obey the panel, refresh the heartbeat ----
@@ -372,7 +508,7 @@ while [ "$(date -u +%s)" -lt "$END_TS" ]; do
       log 'panel asked for stop, exiting'; break ;;
     *'"action":"rdp"'*)
       curl -s --max-time 8 -X POST "$CTL/api/power/clear?m=linux" >/dev/null 2>&1
-      EnableDesktop; CHANGED=1; Publish "desktop: $DESKG"; LASTP=$(date -u +%s) ;;
+      EnableDesktop; CHANGED=1; Publish "desktop: $DESKG browser=$BRG"; LASTP=$(date -u +%s) ;;
   esac
 
   if ! pgrep -f 'cloudflared.*run --token' >/dev/null 2>&1; then
@@ -411,7 +547,7 @@ while [ "$(date -u +%s)" -lt "$END_TS" ]; do
   if [ $(( $(date -u +%s) - LASTP )) -ge 60 ] || [ "$CHANGED" = 1 ]; then
     LASTP=$(date -u +%s)
     Probe
-    Publish "desktop=$DESKG disk=$R2G dbg=$DBGPG"
+    Publish "desktop=$DESKG disk=$R2G dbg=$DBGPG browser=$BRG"
   fi
 done
 
