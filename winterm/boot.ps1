@@ -192,7 +192,7 @@ function Enable-Rdp {
     Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -Force
     Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1 -Force
     Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name SecurityLayer -Value 0 -Force
-    if ($FIXED) { $out += (Set-Account 'administrator' $FIXED) } else { $out += 'pw=none' }
+    if ($FIXED) { $out += (Set-Account $RDPUSER $FIXED) } else { $out += 'pw=none' }
     # The image's packet filter is irrelevant once the only way in is an Access-authenticated tunnel
     # this VM dials out to, and leaving it on is what made the connector's own dial fail.
     New-NetFirewallRule -Name winterm-rdp -DisplayName 'winterm browser RDP' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 -Profile Any -EA SilentlyContinue | Out-Null
@@ -208,10 +208,10 @@ function Enable-Rdp {
 }
 function Enable-Ssh {
   # The browser terminal is Cloudflare's clientless SSH now: the tunnel carries ssh.kun9.ccwu.cc ->
-  # ssh://localhost:22, so the VM only has to serve sshd. Which username Cloudflare sends is set by
-  # the winterm-ssh Access policy's connection_rules (usernames = administrator, email alias off),
-  # so the terminal and the desktop share one account instead of needing a second one named after an
-  # email prefix. Its password is the same fixed one the RDP form uses. Idempotent, run every boot.
+  # ssh://localhost:22, so the VM only has to serve sshd. The winterm-ssh Access app carries no
+  # connection_rules (measured null), so the name typed in the browser terminal goes straight to sshd,
+  # and either account this script creates -- root here, administrator in Enable-Rdp -- answers it with
+  # the one password. Idempotent, run every boot.
   $out = @()
   try {
     $cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' -EA SilentlyContinue | Select-Object -First 1
@@ -294,7 +294,7 @@ function Publish($extra) {
   # Every git call is on a deadline for that reason, and the loop keeps going whatever they return.
   $body = @{
     alive = $true; run_id = $env:GITHUB_RUN_ID; check = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-    url = 'https://rdp.kun9.ccwu.cc'; user = 'administrator'
+    url = 'https://rdp.kun9.ccwu.cc'; user = $SSHUSER; rdp_user = $RDPUSER
     ttl_min = $MIN; opened = $OPENED; ends = $ENDS
     named_procs = $NPN; named = $NAMED; restarts = $script:RESTARTS; boot_diag = $BOOTDIAG
     rdp_diag = Rdp-Diag
@@ -577,9 +577,11 @@ if (-not $OK_CF) {
 
 # ---- desktop credentials ----
 $FIXED = "$env:WT_RDP_PASS".Trim()
-# One account for both doors: the Access policy pins the terminal's SSH username to this name, so
-# there is no longer an account named after an email prefix.
-$SSHUSER = 'administrator'
+# Named `root`, not the desktop's `administrator`, so one client config (User root) logs into whichever
+# machine is live -- Linux only ever has root. administrator still owns the Interactive logon that the RDP
+# form, winterm-desk and winterm-r2disk are bound to, so both accounts exist with the same password.
+$SSHUSER = 'root'
+$RDPUSER = 'administrator'
 $OPENED = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 $ENDS = (Get-Date).ToUniversalTime().AddSeconds($SECS).ToString('yyyy-MM-ddTHH:mm:ssZ')
 

@@ -438,6 +438,7 @@ async function status(env, m) {
       alive: mine && s.alive === true && (fresh(s.check, 180) || !!(r && r.live)),
       url: s.url || '',
       user: mine ? (s.user || '') : '',
+      rdp_user: mine ? (s.rdp_user || '') : '',
       ends: mine ? (s.ends || '') : '',
       check: s.check || '',
       note: mine ? (s.note || '') : '',
@@ -446,7 +447,7 @@ async function status(env, m) {
       restarts: mine ? s.restarts : 0,
       origin: mine ? String(s.ssh_info || '') : '',
       rdp: mine ? String(s.rdp_diag || '') : '',
-      drive: mine ? String(s.drive || '') : '',
+      disk: mine ? String(s.disk || '') : '',
       rdp_ip: mine ? String(s.rdp_ip || '') : '',
       ttl_min: s.ttl_min,
       closed: s.closed || '',
@@ -675,7 +676,7 @@ function app() {
     "function say(m,bad){var e=$('msg');e.textContent=m||'';e.className='msg'+(bad?' err':'')}",
     // The box reports raw service states; the panel says one human thing about each and keeps the rest
     // inside 详细信息, which is where the exact values still show for anyone debugging a boot.
-    "var DIAG={listening:'已就绪',running:'已连接','not-installed':'未安装','not-listening':'已停止','no-listener':'监听进程掉了','no-tunnel-url':'拿不到网址',up:'已接通','no-pass':'缺少口令','no-key':'缺少密钥',down:'已停止',booting:'正在启动',mounted:'已挂载',pending:'挂载中',unmounted:'挂载掉了',armed:'已就绪，等首次连接桌面','wrong-session':'挂在别的会话','no-token':'缺少谷歌盘密钥','rclone-dl-fail':'rclone 下载失败','rclone-missing':'rclone 缺失','no-fuse':'缺 fuse','winfsp-dl-fail':'磁盘驱动下载失败','mount-failed':'挂载失败'};",
+    "var DIAG={listening:'已就绪',running:'已连接','not-installed':'未安装','not-listening':'已停止','no-listener':'监听进程掉了','no-tunnel-url':'拿不到网址',up:'已接通','no-pass':'缺少口令','no-key':'缺少密钥',down:'已停止',booting:'正在启动',mounted:'已挂载',pending:'挂载中',unmounted:'挂载掉了',armed:'已就绪，等首次连接桌面','wrong-session':'挂在别的会话','bad-key':'R2 密钥不被接受','rclone-dl-fail':'rclone 下载失败','rclone-missing':'rclone 缺失','no-fuse':'缺 fuse','winfsp-dl-fail':'磁盘驱动下载失败','mount-failed':'挂载失败'};",
     // One view, two machines. M is the selected machine and every call carries it. The SSH link is the
     // same for both boxes because they share the tunnel and the hostname; the desktop link is not --
     // Windows goes to the fixed Access RDP app, Linux to the noVNC URL it publishes each boot.
@@ -689,7 +690,7 @@ function app() {
     "'隧道握手完成后，桌面和终端就都通了'," +
     "'实测一分钟左右机器就通了，桌面再多半分钟'," +
     "'开机期间再按一次开机没有用，按钮会自己变灰'," +
-    "'开机自动挂上谷歌盘，写进盘里的文件不会随关机丢'," +
+    "'开机自动挂上 R2 网盘，写进盘里的文件不会随关机丢'," +
     "'桌面和终端都是浏览器直连，不用装任何客户端'," +
     "'机器起来后按「打开桌面」或「打开终端」，浏览器会先让你过一次登录'," +
     "];",
@@ -712,18 +713,21 @@ function app() {
     " if(phase){$('ph').textContent='已触发，正在准备系统，还没上报';wait0=(new Date(String(u.created||'')).getTime())||0;}",
     " else $('hint').textContent='';",
     " VURL=alive?(v.url||''):'';$('url').textContent=(alive&&v.url)?v.url:'-';",
-    " $('user').textContent=alive?(v.user||'-'):(M==='linux'?'root':'administrator');",
+    " $('user').textContent=alive?(v.user||'-'):'root';",
+    // Windows answers SSH as root but its desktop account cannot move: the RDP form, winterm-desk and
+    // winterm-r2disk are all bound to administrator's Interactive logon. Say so in the same cell.
+    " if(alive&&v.rdp_user&&v.rdp_user!==v.user)$('user').textContent+='（桌面 '+v.rdp_user+'）';",
     " $('ends').textContent=fmt(v.ends);",
     " $('check').textContent=fmt(v.check);",
     " $('run').textContent=u?('#'+(u.number||'')+' '+u.status+(u.conclusion?' / '+u.conclusion:'')):'-';",
     // The hostname is real even though the machine is not, so hand over the plain ssh form too: no
     // browser involved, and it works from any terminal that can reach the tunnel.
-    " $('ssh').textContent=alive?('终端：ssh '+($('user').textContent)+'@ssh.kun9.ccwu.cc'):'';",
+    " $('ssh').textContent=alive?('终端：ssh '+(v.user||'root')+'@ssh.kun9.ccwu.cc'):'';",
     " var L=[];",
     " if(v.note)L.push('上报内容：'+esc(v.note));",
     " if(v.restarts)L.push('隧道重连：'+esc(v.restarts)+' 次');",
     " if(v.rdp)L.push('桌面：'+esc(DIAG[v.rdp]||v.rdp));",
-    " if(v.drive)L.push('谷歌盘：'+esc(DIAG[v.drive]||v.drive));",
+    " if(v.disk)L.push('R2 网盘：'+esc(DIAG[v.disk]||v.disk));",
     " if(v.origin)L.push('终端进程：'+esc(v.origin));",
     " if(v.named)L.push('隧道：'+esc(DIAG[v.named]||v.named));",
     " if(r.error)L.push(esc(r.error));",
