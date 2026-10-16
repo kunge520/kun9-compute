@@ -41,6 +41,10 @@ $ref = $env:GITHUB_REF_NAME
 $CTL = 'https://ctl.kun9.ccwu.cc'
 git config user.name winterm
 git config user.email winterm@users.noreply.github.com
+# Nothing here may hang: git's own abort for a transfer that stays under 512 B/s for 20 s, and
+# Invoke-Bounded below for the stalls that never even start moving. See Publish.
+git config http.lowSpeedLimit 512
+git config http.lowSpeedTime 20
 
 $tok = (Get-Content trigger.winterm -Raw) -split '\s+'
 $MIN = 0; [void][int]::TryParse($tok[0], [ref]$MIN)
@@ -236,20 +240,58 @@ function Start-Named([string]$token) {
   Start-Process -FilePath (Join-Path $work 'cfn.exe') -ArgumentList @('tunnel', '--no-autoupdate', '--protocol', 'http2', '--logfile', (Join-Path $work 'cfn.log'), 'run', '--token', $token) -RedirectStandardOutput (Join-Path $work 'cfn.out') -RedirectStandardError (Join-Path $work 'cfn.err') -NoNewWindow
 }
 
+function Invoke-Bounded([int]$sec, [string]$exe, [string[]]$a) {
+  # Run a command under a hard deadline and return its exit code, 124 when it had to be killed, 125 when
+  # it would not start. Nothing is redirected: an unread pipe is a deadlock of its own, and the runner
+  # drains the console this child inherits.
+  # Kill the whole tree, not just the child: git drives a network transfer inside git-remote-http, so a
+  # single-process kill would leave that holding the connection and the lock files.
+  $p = New-Object Diagnostics.Process
+  try {
+    $p.StartInfo.FileName = $exe
+    # An argument with a space is quoted and a quote inside it escaped, because the commit message
+    # carries the tunnel's own log tail, and that is JSON.
+    $p.StartInfo.Arguments = (($a | ForEach-Object {
+      $s = "$_"
+      if ($s -match '[ "]') { '"' + ($s -replace '"', '\"') + '"' } else { $s }
+    }) -join ' ')
+    $p.StartInfo.WorkingDirectory = $work
+    $p.StartInfo.UseShellExecute = $false
+    $p.StartInfo.CreateNoWindow = $true
+    [void]$p.Start()
+    if (-not $p.WaitForExit($sec * 1000)) {
+      & taskkill /T /F /PID $p.Id 2>&1 | Out-Null
+      [void]$p.WaitForExit(3000)
+      return 124
+    }
+    return $p.ExitCode
+  } catch { return 125 } finally { try { $p.Dispose() } catch { } }
+}
+
 function Sync-Head {
   # A previous session.json writer (the run this one replaced, still publishing while it is being
   # cancelled) makes "git pull --rebase" stop mid-way with a conflict, and every later add/commit
   # then fails silently -- the VM was alive but stopped publishing. The heartbeat is regenerated
   # from live state, so the local copy always wins: abandon any half-finished rebase, drop a stale
-  # index lock and hard-reset to origin. Untracked files (cf.exe, the logs) survive a reset.
+  # lock and hard-reset to origin. Untracked files (cf.exe, the logs) survive a reset.
+  # A hard kill cannot clean up after itself, so every lock file a dead fetch could have left is dropped
+  # here before the new one starts.
   git rebase --quit 2>$null | Out-Null
   git merge --abort 2>$null | Out-Null
   Remove-Item (Join-Path $work '.git\index.lock') -Force -EA SilentlyContinue
-  git fetch -q origin $ref 2>$null
+  Remove-Item (Join-Path $work '.git\shallow.lock') -Force -EA SilentlyContinue
+  Get-ChildItem (Join-Path $work '.git\refs') -Recurse -Filter '*.lock' -File -EA SilentlyContinue |
+    Remove-Item -Force -EA SilentlyContinue
+  [void](Invoke-Bounded 60 'git' @('fetch', '-q', 'origin', $ref))
   git reset -q --hard ("origin/" + $ref) 2>$null
 }
 
 function Publish($extra) {
+  # The heartbeat is the panel's only picture of this machine, and Publish is called from inside the
+  # supervise loop. An unbounded git call here therefore does more than lose one heartbeat: it blocks
+  # the loop, so the tunnel restart, the panel-stop poll and the debug re-arm all stop with it, and the
+  # box spends its remaining minutes unreachable while the panel still reads the last record as alive.
+  # Every git call is on a deadline for that reason, and the loop keeps going whatever they return.
   $body = @{
     alive = $true; run_id = $env:GITHUB_RUN_ID; check = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     url = 'https://rdp.kun9.ccwu.cc'; user = 'administrator'
@@ -264,17 +306,23 @@ function Publish($extra) {
     cfn_tail = ((Tail (Join-Path $work 'cfn.log') 2) + ' || ' + (Tail (Join-Path $work 'cfn.err') 4))
   }
   foreach ($k in $extra.Keys) { $body[$k] = $extra[$k] }
+  # pub is the previous publish's answer. Only a push that worked can carry the report, so this is how a
+  # box whose git is broken but whose tunnel is fine still says so.
+  if ($script:PUB) {
+    $n = '' + $body.note
+    if ($n) { $body.note = $n + ' pub=' + $script:PUB } else { $body.note = 'pub=' + $script:PUB }
+  }
   $json = $body | ConvertTo-Json -Compress
   $script:LASTJSON = $json
   Write-Host ('WINTERM-JSON ' + $json)
+  $msg = "winterm heartbeat " + (Get-Date).ToUniversalTime().ToString('s') + "Z named=" + $NAMED
   foreach ($try in 1..3) {
     Sync-Head
     Set-Content -Path (Join-Path $work 'winterm/session.json') -Value $json -Encoding ascii
-    git add -f winterm/session.json
-    git commit -qm ("winterm heartbeat " + (Get-Date).ToUniversalTime().ToString('s') + "Z named=" + $NAMED)
-    if ($LASTEXITCODE -ne 0) { Start-Sleep -Seconds 3; continue }
-    git push -q origin HEAD:$ref
-    if ($LASTEXITCODE -eq 0) { return }
+    [void](Invoke-Bounded 30 'git' @('add', '-f', 'winterm/session.json'))
+    if ((Invoke-Bounded 30 'git' @('commit', '-q', '-m', $msg)) -ne 0) { $script:PUB = 'commit-fail'; Start-Sleep -Seconds 3; continue }
+    if ((Invoke-Bounded 90 'git' @('push', '-q', 'origin', ("HEAD:" + $ref))) -eq 0) { $script:PUB = 'ok'; return }
+    $script:PUB = 'push-fail'
     Write-Host ('push attempt ' + $try + ' failed')
     Start-Sleep -Seconds 4
   }
@@ -333,12 +381,13 @@ function Enable-R2 {
     if (-not $f) { return 'rclone-missing' }
     Copy-Item $f.FullName $exe -Force
   }
-  # WinFsp is the FUSE driver rclone mounts through; the MSI is idempotent, so no version probe.
+  # WinFsp is the FUSE driver rclone mounts through; the MSI is idempotent, so no version probe. On a
+  # deadline because msiexec blocks on the installer service, and a hang here would stop the boot before
+  # the supervise loop ever started -- no heartbeat, no panel stop, no tunnel restart.
   $msi = Join-Path $t 'winfsp.msi'
   if (-not (Test-Path $msi)) { Get-Binary 'https://github.com/winfsp/winfsp/releases/download/v2.0/winfsp-2.0.23075.msi' $msi 500KB | Out-Null }
-  if (Test-Path $msi) {
-    try { Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn', '/norestart') -Wait -PassThru | Out-Null } catch { }
-  } else { return 'winfsp-dl-fail' }
+  if (Test-Path $msi) { [void](Invoke-Bounded 900 'msiexec.exe' @('/i', $msi, '/qn', '/norestart')) }
+  else { return 'winfsp-dl-fail' }
   # R2 is plain S3, so the remote is one [r2] block. no_check_bucket is required: rclone's usual
   # HeadBucket probe answers 404 on R2 and reads as a bucket that does not exist. The key pair is a
   # Cloudflare API token, so unlike an OAuth blob it never expires and never needs a browser.
@@ -519,9 +568,9 @@ if (-not $OK_CF) {
   $diag = @{ alive = $false; error = 'cloudflared download failed'; note = 'cloudflared download failed'; url = ''; closed = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); run_id = $env:GITHUB_RUN_ID } | ConvertTo-Json -Compress
   Sync-Head
   Set-Content -Path (Join-Path $work 'winterm/session.json') -Value $diag -Encoding ascii
-  git add -f winterm/session.json
-  git commit -qm ("winterm no cloudflared " + (Get-Date).ToUniversalTime().ToString('s') + "Z")
-  git push -q origin HEAD:$ref
+  [void](Invoke-Bounded 30 'git' @('add', '-f', 'winterm/session.json'))
+  [void](Invoke-Bounded 30 'git' @('commit', '-q', '-m', ("winterm no cloudflared " + (Get-Date).ToUniversalTime().ToString('s') + "Z")))
+  [void](Invoke-Bounded 90 'git' @('push', '-q', 'origin', ("HEAD:" + $ref)))
   Write-Host '=== giving up: cloudflared did not download ==='
   exit 0
 }
@@ -669,7 +718,7 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
 $dead = @{ alive = $false; url = 'https://rdp.kun9.ccwu.cc'; closed = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); run_id = $env:GITHUB_RUN_ID; restarts = $script:RESTARTS; named = $NAMED } | ConvertTo-Json -Compress
 Sync-Head
 Set-Content -Path (Join-Path $work 'winterm/session.json') -Value $dead -Encoding ascii
-git add -f winterm/session.json
-git commit -qm "winterm closed $((Get-Date).ToUniversalTime().ToString('s'))Z"
-git push -q origin HEAD:$ref
+[void](Invoke-Bounded 30 'git' @('add', '-f', 'winterm/session.json'))
+[void](Invoke-Bounded 30 'git' @('commit', '-q', '-m', ("winterm closed " + (Get-Date).ToUniversalTime().ToString('s') + "Z")))
+[void](Invoke-Bounded 90 'git' @('push', '-q', 'origin', ("HEAD:" + $ref)))
 exit 0

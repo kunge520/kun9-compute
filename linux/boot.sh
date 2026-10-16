@@ -33,6 +33,13 @@ export DEBIAN_FRONTEND=noninteractive
 
 git config user.name linuxd
 git config user.email linuxd@users.noreply.github.com
+# No command in this script may be able to hang forever, because Publish is called from the middle of
+# the supervise loop: one stalled transfer there stops the tunnel restart, the panel-stop poll and the
+# heartbeat, and the box then burns its remaining minutes unreachable while the panel still reads its
+# last record as alive. git aborts a transfer that stays under 512 B/s for 20 s, and `timeout` is the
+# backstop for a stall that never starts moving at all.
+git config http.lowSpeedLimit 512
+git config http.lowSpeedTime 20
 
 # Run length: first token of trigger.linuxd, minutes. 350 not 360 because timeout-minutes: 360 is
 # GitHub's hard kill, and a job killed there never writes its dead record, so the panel misreports.
@@ -44,6 +51,7 @@ SECS=$((MIN * 60))
 OPENED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ENDS=$(date -u -d "+$SECS seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
 RESTARTS=0
+PUB=''
 NOTEG='ssh up'
 DESKG='not-installed'
 # The disk's state is probed from the mount table, never trusted from a variable: the mount runs as
@@ -68,8 +76,10 @@ log() { echo "[$(date -u +%H:%M:%S)] $*"; }
 EnableSsh() {
   if [ ! -x /usr/sbin/sshd ]; then
     log 'openssh-server missing, installing'
-    sudo apt-get update -qq || return 1
-    sudo apt-get install -y -qq openssh-server || return 1
+    # apt is on a timer wherever it can be reached from: a mirror that stops answering, or a dpkg lock
+    # held by another install, would otherwise stall the caller forever.
+    sudo timeout 300 apt-get update -qq || return 1
+    sudo timeout 600 apt-get install -y -qq openssh-server || return 1
   fi
   # Drop-in, not an edit of the main config: the runner image's sshd_config includes sshd_config.d/*
   # and a future image change then cannot undo these three lines.
@@ -190,19 +200,24 @@ EnableDisk() {
     f=$(find "$d" -name rclone -type f -perm -u+x | head -1)
     [ -f "$f" ] && cp "$f" "$rc" && chmod +x "$rc" || { echo rclone-missing >"$d/r2.diag"; return 1; }
   fi
-  command -v fusermount3 >/dev/null || sudo apt-get install -y -qq fuse3 >/dev/null 2>&1
+  command -v fusermount3 >/dev/null || sudo timeout 600 apt-get install -y -qq fuse3 >/dev/null 2>&1
   command -v fusermount3 >/dev/null || { echo no-fuse >"$d/r2.diag"; return 1; }
   printf '[r2]\ntype = s3\nprovider = Cloudflare\naccess_key_id = %s\nsecret_access_key = %s\nendpoint = %s\nno_check_bucket = true\n' \
     "$R2_AKID" "$R2_AKS" "$ep" >"$d/r2.conf"
   chmod 600 "$d/r2.conf"
   sudo mkdir -p "$m"
+  # This is only ever reached when the mount table says there is no working mount, so any rclone still
+  # running is a wedged one holding the path; two mounts on $m would leave the second failing forever.
+  pgrep -x rclone >/dev/null 2>&1 && { sudo pkill -x rclone; sleep 2; }
   sudo nohup "$rc" mount --config "$d/r2.conf" "r2:$bu" "$m" --volname disk \
     --vfs-cache-mode writes --dir-cache-time 30s --log-level INFO --log-file "$d/r2.log" \
     >"$d/r2.out" 2>&1 &
   local i
   for i in $(seq 1 12); do
     sleep 2
-    sudo mountpoint -q "$m" 2>/dev/null && { echo mounted >"$d/r2.diag"; log "disk mounted at $m"; return 0; }
+    # mountpoint stats the path, and stat on a wedged FUSE mount blocks in the kernel, so no probe of it
+    # runs without a timer: a disk must never be able to stall the loop that is watching it.
+    timeout 10 sudo mountpoint -q "$m" 2>/dev/null && { echo mounted >"$d/r2.diag"; log "disk mounted at $m"; return 0; }
   done
   grep -qiE 'InvalidAccessKeyId|SignatureDoesNotMatch|AccessForbidden|InvalidToken' "$d/r2.log" 2>/dev/null \
     && { echo bad-key >"$d/r2.diag"; return 1; }
@@ -223,9 +238,9 @@ EnableDisk() {
 EnableDesktop() {
   if [ ! -x /usr/bin/Xvnc ]; then
     log 'installing xfce4 + tigervnc + novnc (this is the slow part)'
-    sudo apt-get update -qq
+    sudo timeout 300 apt-get update -qq
     # fonts-wqy-microhei so the desktop renders Chinese, not empty boxes.
-    sudo apt-get install -y -qq --no-install-recommends xfce4 xfce4-terminal xfce4-goodies \
+    sudo timeout 1800 apt-get install -y -qq --no-install-recommends xfce4 xfce4-terminal xfce4-goodies \
       dbus-x11 fonts-wqy-microhei tigervnc-standalone-server tigervnc-common tigervnc-tools \
       novnc websockify || { DESKG='apt-fail'; return 1; }
   fi
@@ -263,33 +278,42 @@ EnableDesktop() {
 }
 
 # ---- heartbeat: same file shape the panel already reads for winterm ----
+# Every network git call runs under `timeout`: --kill-after is what catches a Smart-HTTP transfer that
+# stops moving and ignores the warning. A hard kill cannot clean up after itself, so every lock file a
+# dead fetch could have left is dropped before the new one starts.
 SyncHead() {
   git rebase --quit >/dev/null 2>&1
   git merge --abort >/dev/null 2>&1
-  rm -f .git/index.lock
-  git fetch -q origin "$REF" >/dev/null 2>&1
+  rm -f .git/index.lock .git/shallow.lock
+  find .git/refs -name '*.lock' -type f -delete 2>/dev/null
+  timeout --kill-after=20 60 git fetch -q origin "$REF" >/dev/null 2>&1
   git reset -q --hard "origin/$REF" >/dev/null 2>&1
 }
 
 Publish() {
   local note="$1"
   local json
+  # pub is the previous publish's answer. Only a push that worked can carry the report, so this is how
+  # a box whose git is broken but whose tunnel is fine still says so.
+  [ -n "$PUB" ] && note="$note pub=$PUB"
   json=$(printf '{"alive":true,"machine":"linux","run_id":"%s","check":"%s","url":"%s","ssh_url":"https://ssh.kun9.ccwu.cc","user":"root","ttl_min":%s,"opened":"%s","ends":"%s","named":"%s","restarts":%s,"rdp_diag":"%s","rdp_info":"%s","ssh_info":"%s","disk":"%s","dbg_url":"%s","dbg_diag":"%s","note":"%s"}' \
     "$GITHUB_RUN_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DESKURL" "$MIN" "$OPENED" "$ENDS" "$CFPG" "$RESTARTS" \
     "$DESKG" "vnc 127.0.0.1:$VNCPORT" "sshd 127.0.0.1:22 user=root" "$R2G" "$DBGURL" "$DBGPG" "$note")
   echo "LINUXD-JSON $json"
-  local i
+  local i rc=0
   for i in 1 2 3; do
     SyncHead
     mkdir -p linux
     printf '%s\n' "$json" >"$SESSION"
     git add -f "$SESSION"
-    git commit -qm "linuxd heartbeat $(date -u +%Y-%m-%dT%H:%M:%SZ) named=$CFPG" >/dev/null 2>&1 || { sleep 3; continue; }
-    git push -q origin "HEAD:$REF" >/dev/null 2>&1 && return 0
+    git commit -qm "linuxd heartbeat $(date -u +%Y-%m-%dT%H:%M:%SZ) named=$CFPG" >/dev/null 2>&1 || { PUB='commit-fail'; sleep 3; continue; }
+    timeout --kill-after=20 90 git push -q origin "HEAD:$REF" >/dev/null 2>&1 && { PUB='ok'; return 0; }
+    PUB='push-fail'
+    rc=1
     log "push attempt $i failed"
     sleep 4
   done
-  return 1
+  return $rc
 }
 
 # ---- boot ----
@@ -324,7 +348,7 @@ Probe() {
   # A mount has an outside answer -- the mount table -- so it is never taken from the starter that
   # ran it in a background job. That job only leaves its reason in a file, which is what R2G reads.
   R2G=$(cat "$HOME/cf/r2.diag" 2>/dev/null || echo pending)
-  [ "$R2G" = mounted ] && { sudo mountpoint -q "$R2DIR" 2>/dev/null || R2G='unmounted'; }
+  [ "$R2G" = mounted ] && { timeout 10 sudo mountpoint -q "$R2DIR" 2>/dev/null || R2G='unmounted'; }
 }
 Probe
 
@@ -378,7 +402,7 @@ while [ "$(date -u +%s)" -lt "$END_TS" ]; do
   # Disk: a FUSE mount can stall or its rclone can be killed, and unlike the desktop nobody opens it
   # by hand to notice. Retry on a timer, so a first boot that lost to a slow apt still ends up with
   # the disk mounted.
-  if ! sudo mountpoint -q "$R2DIR" 2>/dev/null && [ $(( $(date -u +%s) - R2LAST )) -ge 120 ]; then
+  if ! timeout 10 sudo mountpoint -q "$R2DIR" 2>/dev/null && [ $(( $(date -u +%s) - R2LAST )) -ge 120 ]; then
     R2LAST=$(date -u +%s)
     log 'disk not mounted, retrying'
     EnableDisk; CHANGED=1
@@ -398,6 +422,6 @@ printf '{"alive":false,"machine":"linux","run_id":"%s","url":"","ssh_url":"https
   "$GITHUB_RUN_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$CFPG" "$RESTARTS" "$MIN" "$DBGURL" >"$SESSION"
 git add -f "$SESSION"
 git commit -qm "linuxd closed $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1
-git push -q origin "HEAD:$REF" >/dev/null 2>&1
+timeout --kill-after=20 90 git push -q origin "HEAD:$REF" >/dev/null 2>&1
 log 'released, goodbye'
 exit 0
