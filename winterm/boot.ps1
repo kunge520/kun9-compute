@@ -293,16 +293,16 @@ function Get-Binary([string]$url, [string]$out, [int]$minBytes) {
   }
   return $false
 }
-# ---- Google Drive: the owner's account mounted as Z: ----
+# ---- Cloudflare R2: the owner's bucket mounted as Z: ----
 # Best-effort convenience, never a dependency: whatever happens here only shows up in the note the
 # panel reads, and the desktop still comes up. The mount is NOT started here -- a drive letter belongs
 # to the logon session that created it, and this job's session is never the desktop session, so what
 # worked in Test-Path was invisible on the desktop. It is installed as a logon task for the RDP account
 # instead, so the drive appears in the session that actually uses it.
-$script:GDARMED = $false
-$script:GDLAST = (Get-Date).AddDays(-1)
-$script:GDTASK = 'winterm-gdrive'
-function Get-GdDiag {
+$script:R2ARMED = $false
+$script:R2LAST = (Get-Date).AddDays(-1)
+$script:R2TASK = 'winterm-r2disk'
+function Get-R2Diag {
   # A drive letter belongs to the logon session that created it, so a running rclone only counts when it
   # runs in a desktop session: one in session 0 is healthy, invisible, and holds the letter the desktop
   # needs. The process table is machine-wide, which is why the session id is checked here.
@@ -311,18 +311,18 @@ function Get-GdDiag {
   if ($p.Count -gt 0) { return 'wrong-session' }
   return 'armed'
 }
-function Start-DriveTask {
+function Start-R2Task {
   try { Get-Process rclone -EA SilentlyContinue | Where-Object { $_.SessionId -eq 0 } | Stop-Process -Force -EA SilentlyContinue } catch { }
-  try { & schtasks /run /tn $script:GDTASK 2>&1 | Out-Null } catch { }
+  try { & schtasks /run /tn $script:R2TASK 2>&1 | Out-Null } catch { }
   for ($i = 0; $i -lt 5; $i++) {
     Start-Sleep -Seconds 2
-    if ((Get-GdDiag) -eq 'mounted') { return 'mounted' }
+    if ((Get-R2Diag) -eq 'mounted') { return 'mounted' }
   }
-  return (Get-GdDiag)
+  return (Get-R2Diag)
 }
 
-function Enable-Drive {
-  if (-not "$env:GD_TOKEN") { return 'no-token' }
+function Enable-R2 {
+  if (-not "$env:R2_AKID" -or -not "$env:R2_AKS") { return 'no-key' }
   $t = Join-Path $env:ProgramData 'winterm'
   if (-not (Test-Path $t)) { New-Item -ItemType Directory -Path $t -Force -EA SilentlyContinue | Out-Null }
   $exe = Join-Path $t 'rclone.exe'
@@ -339,19 +339,23 @@ function Enable-Drive {
   if (Test-Path $msi) {
     try { Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn', '/norestart') -Wait -PassThru | Out-Null } catch { }
   } else { return 'winfsp-dl-fail' }
-  # One line, straight from the secret: rclone reads the OAuth blob as-is and refreshes it with its own
-  # built-in client, and the refresh_token does not rotate -- which is what makes one baked secret good
-  # for every boot.
-  $conf = Join-Path $t 'gd.conf'
-  $L = @('[gd]', 'type = drive', 'scope = drive', ('token = ' + "$env:GD_TOKEN".Trim()))
+  # R2 is plain S3, so the remote is one [r2] block. no_check_bucket is required: rclone's usual
+  # HeadBucket probe answers 404 on R2 and reads as a bucket that does not exist. The key pair is a
+  # Cloudflare API token, so unlike an OAuth blob it never expires and never needs a browser.
+  $conf = Join-Path $t 'r2.conf'
+  $L = @('[r2]', 'type = s3', 'provider = Cloudflare',
+         ('access_key_id = ' + "$env:R2_AKID".Trim()),
+         ('secret_access_key = ' + "$env:R2_AKS".Trim()),
+         'endpoint = 0d5f4724a0cf54b406333fcf8e7a0b65.r2.cloudflarestorage.com',
+         'no_check_bucket = true')
   Set-Content -Path $conf -Value ($L -join "`r`n") -Encoding ascii
-  # Only the config file (which carries the token) is locked; the directory keeps inherited permissions
-  # so rclone.exe stays executable from any session. The interactive account is granted by name, not
-  # through BUILTIN\Administrators: a filtered UAC token keeps that group deny-only, so a group-only
-  # grant makes the config unreadable to exactly the session that has to mount it.
+  # Only the config file (which carries the secret key) is locked; the directory keeps inherited
+  # permissions so rclone.exe stays executable from any session. The interactive account is granted by
+  # name, not through BUILTIN\Administrators: a filtered UAC token keeps that group deny-only, so a
+  # group-only grant makes the config unreadable to exactly the session that has to mount it.
   & icacls $conf /inheritance:r /grant 'administrator:F' /grant 'Administrators:F' /grant 'SYSTEM:F' /Q 2>&1 | Out-Null
-  $arg = '--config "' + $conf + '" mount gd: Z: --no-console --volname drive ' +
-    '--vfs-cache-mode writes --dir-cache-time 30s --log-level INFO --log-file "' + (Join-Path $t 'gd.log') + '"'
+  $arg = '--config "' + $conf + '" mount r2:kun9disk Z: --no-console --volname disk ' +
+    '--vfs-cache-mode writes --dir-cache-time 30s --log-level INFO --log-file "' + (Join-Path $t 'r2.log') + '"'
   try {
     $a = New-ScheduledTaskAction -Execute $exe -Argument $arg
     $tr = New-ScheduledTaskTrigger -AtLogOn -User 'administrator'
@@ -364,10 +368,10 @@ function Enable-Drive {
     # there is visible to Test-Path from the task and invisible to Explorer -- same user, same session 1,
     # different token.
     $pr = New-ScheduledTaskPrincipal -UserId 'administrator' -LogonType Interactive -RunLevel Limited
-    Register-ScheduledTask -TaskName $script:GDTASK -Action $a -Trigger $tr -Settings $st -Principal $pr -Force | Out-Null
-    $script:GDARMED = $true
+    Register-ScheduledTask -TaskName $script:R2TASK -Action $a -Trigger $tr -Settings $st -Principal $pr -Force | Out-Null
+    $script:R2ARMED = $true
   } catch { return 'reg-fail: ' + $_.Exception.Message }
-  return (Start-DriveTask)
+  return (Start-R2Task)
 }
 
 # ---- AI debug channel: a key-gated command echo on localhost, out through a quick tunnel ----
@@ -570,13 +574,13 @@ if ($script:DBGON) {
 $script:DBGLAST = Get-Date
 Publish @{ note = ('rdp ready, named=' + $NAMED + ' dbg=' + $DBGDIAG) }
 
-# The drive is the slow part of a boot -- a rclone zip and a WinFsp MSI -- so it comes after the
+# The disk is the slow part of a boot -- a rclone zip and a WinFsp MSI -- so it comes after the
 # heartbeat above has already told the panel the box is up, not before it. What it reports at boot is
 # usually 'armed', which is correct and not a failure: the mount is a logon task, so Z: only exists
 # once someone connects the desktop.
-$script:GDDIAG = Enable-Drive
-Write-Host ('drive at boot: ' + $GDDIAG)
-Publish @{ drive = $script:GDDIAG; note = ('named=' + $NAMED + ' drive=' + $GDDIAG + ' dbg=' + $DBGDIAG) }
+$script:R2DIAG = Enable-R2
+Write-Host ('disk at boot: ' + $R2DIAG)
+Publish @{ disk = $script:R2DIAG; note = ('named=' + $NAMED + ' disk=' + $R2DIAG + ' dbg=' + $DBGDIAG) }
 
 # ---- supervise: keep the tunnel alive and obey the panel ----
 $until = (Get-Date).ToUniversalTime().AddSeconds($SECS)
@@ -620,16 +624,16 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
     $changed = $true
   }
 
-  if ($script:GDARMED) {
-    $script:GDDIAG = Get-GdDiag
+  if ($script:R2ARMED) {
+    $script:R2DIAG = Get-R2Diag
     # Only chase a missing mount while someone is actually logged on -- otherwise 'armed' is the honest
     # state and the logon trigger does the work. The cooldown stops a failing mount from turning every
     # poll into a heartbeat commit.
-    if ($script:GDDIAG -ne 'mounted' -and ((Get-Date) - $script:GDLAST).TotalSeconds -ge 60) {
+    if ($script:R2DIAG -ne 'mounted' -and ((Get-Date) - $script:R2LAST).TotalSeconds -ge 60) {
       if ((& query user 2>&1 | Out-String) -match 'Active') {
-        Write-Host 'drive mount gone, re-arming'
-        $script:GDLAST = Get-Date
-        $script:GDDIAG = Start-DriveTask
+        Write-Host 'disk mount gone, re-arming'
+        $script:R2LAST = Get-Date
+        $script:R2DIAG = Start-R2Task
         $changed = $true
       }
     }
@@ -657,7 +661,7 @@ while ((Get-Date).ToUniversalTime() -lt $until) {
   }
 
   if ($changed -or ((Get-Date) - $lastPublish).TotalSeconds -ge 60) {
-    Publish @{ drive = $script:GDDIAG; note = ('named=' + $NAMED + ' drive=' + $script:GDDIAG + ' dbg=' + $script:DBGTUN) }
+    Publish @{ disk = $script:R2DIAG; note = ('named=' + $NAMED + ' disk=' + $script:R2DIAG + ' dbg=' + $script:DBGTUN) }
     $lastPublish = Get-Date
   }
 }

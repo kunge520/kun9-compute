@@ -14,10 +14,9 @@
 # SSH terminal and for the VNC desktop. WT_TUNNEL_TOKEN is the named-connector token.
 # CST_S3_AKSEC is not storage here, only the second factor of the debug HMAC key below.
 #
-# Google Drive is mounted at /root/drive (rclone + FUSE) and is the one thing here that survives a run.
-# It replaces the 数据胶囊, removed the day before because the link to that bucket is too slow from
-# China to be usable as a disk. Drive needs no bucket: a file written into /root/drive goes up to the
-# account and shows up in its web UI from any other machine.
+# R2 is mounted at /root/drive (rclone + FUSE) and is the one thing here that survives a run: the bucket
+# is kun9disk on his Cloudflare account -- 10 GB free, egress free -- reached with a plain S3 key pair
+# (R2_AKID / R2_AKS) that is an API token, so nothing has to be re-consented and nothing expires.
 #
 # Desktop order matters for a different reason than it does on Windows: sshd and the tunnel come up
 # first and publish a heartbeat, so the machine is reachable inside a minute while apt is still
@@ -47,10 +46,10 @@ ENDS=$(date -u -d "+$SECS seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%
 RESTARTS=0
 NOTEG='ssh up'
 DESKG='not-installed'
-# The drive's state is probed from the mount table, never trusted from a variable: the mount runs as
+# The disk's state is probed from the mount table, never trusted from a variable: the mount runs as
 # root in a background job, so it cannot report back into this shell. See Probe().
-GDDIR=/root/drive
-GDG='pending'
+R2DIR=/root/drive
+R2G='pending'
 # autoconnect and resize are noVNC URL settings (app/ui.js reads them). The VNC password is NOT one of
 # them: this string is committed to linux/session.json in a public repo, and this same password is also
 # the SSH and panel credential. So the link is published clean and noVNC asks for it once per session --
@@ -167,7 +166,7 @@ StartDbgTunnel() {
   return 1
 }
 
-# ---- Google Drive: the box's durable disk ----
+# ---- R2: the box's durable disk ----
 # rclone comes from its own zip, not apt, so this never queues behind the desktop install's dpkg lock;
 # fuse3 is only fetched if the image happens not to have fusermount3.
 #
@@ -175,34 +174,39 @@ StartDbgTunnel() {
 # is readable by nobody but the user that created it unless /etc/fuse.conf grants allow_other. A
 # runner-owned mount would answer root's own `ls` with Permission denied, so the owner has to match.
 #
-# The token is GD_TOKEN, the OAuth blob from `rclone authorize "drive"`: rclone refreshes it itself,
-# with its own built-in client, and the refresh_token does not rotate -- which is what makes one baked
-# secret good for every boot.
-EnableDrive() {
+# R2 speaks S3, so the remote is a [r2] block on the account's storage endpoint. The key pair is just a
+# Cloudflare API token, so unlike Google Drive it never expires and never needs a browser consent page.
+# no_check_bucket is required: rclone's usual HeadBucket probe answers 404 on R2 and reads as a bucket
+# that does not exist.
+EnableDisk() {
   local d="$HOME/cf" rc="$HOME/cf/rclone" m=/root/drive
+  local ep=0d5f4724a0cf54b406333fcf8e7a0b65.r2.cloudflarestorage.com bu=kun9disk
   mkdir -p "$d"
-  if [ -z "$GD_TOKEN" ]; then echo no-token >"$d/gd.diag"; return 1; fi
+  if [ -z "$R2_AKID" ] || [ -z "$R2_AKS" ]; then echo no-key >"$d/r2.diag"; return 1; fi
   if [ ! -x "$rc" ]; then
     curl -sL --max-time 180 -o "$d/rc.zip" https://downloads.rclone.org/rclone-current-linux-amd64.zip \
-      || { echo rclone-dl-fail >"$d/gd.diag"; return 1; }
-    (cd "$d" && unzip -oq rc.zip) || { echo rclone-unzip-fail >"$d/gd.diag"; return 1; }
+      || { echo rclone-dl-fail >"$d/r2.diag"; return 1; }
+    (cd "$d" && unzip -oq rc.zip) || { echo rclone-unzip-fail >"$d/r2.diag"; return 1; }
     f=$(find "$d" -name rclone -type f -perm -u+x | head -1)
-    [ -f "$f" ] && cp "$f" "$rc" && chmod +x "$rc" || { echo rclone-missing >"$d/gd.diag"; return 1; }
+    [ -f "$f" ] && cp "$f" "$rc" && chmod +x "$rc" || { echo rclone-missing >"$d/r2.diag"; return 1; }
   fi
   command -v fusermount3 >/dev/null || sudo apt-get install -y -qq fuse3 >/dev/null 2>&1
-  command -v fusermount3 >/dev/null || { echo no-fuse >"$d/gd.diag"; return 1; }
-  printf '[gd]\ntype = drive\nscope = drive\ntoken = %s\n' "$GD_TOKEN" >"$d/gd.conf"
-  chmod 600 "$d/gd.conf"
+  command -v fusermount3 >/dev/null || { echo no-fuse >"$d/r2.diag"; return 1; }
+  printf '[r2]\ntype = s3\nprovider = Cloudflare\naccess_key_id = %s\nsecret_access_key = %s\nendpoint = %s\nno_check_bucket = true\n' \
+    "$R2_AKID" "$R2_AKS" "$ep" >"$d/r2.conf"
+  chmod 600 "$d/r2.conf"
   sudo mkdir -p "$m"
-  sudo nohup "$rc" mount --config "$d/gd.conf" gd: "$m" --volname drive \
-    --vfs-cache-mode writes --dir-cache-time 30s --log-level INFO --log-file "$d/gd.log" \
-    >"$d/gd.out" 2>&1 &
+  sudo nohup "$rc" mount --config "$d/r2.conf" "r2:$bu" "$m" --volname disk \
+    --vfs-cache-mode writes --dir-cache-time 30s --log-level INFO --log-file "$d/r2.log" \
+    >"$d/r2.out" 2>&1 &
   local i
   for i in $(seq 1 12); do
     sleep 2
-    sudo mountpoint -q "$m" 2>/dev/null && { echo mounted >"$d/gd.diag"; log "drive mounted at $m"; return 0; }
+    sudo mountpoint -q "$m" 2>/dev/null && { echo mounted >"$d/r2.diag"; log "disk mounted at $m"; return 0; }
   done
-  echo mount-failed >"$d/gd.diag"
+  grep -qiE 'InvalidAccessKeyId|SignatureDoesNotMatch|AccessForbidden|InvalidToken' "$d/r2.log" 2>/dev/null \
+    && { echo bad-key >"$d/r2.diag"; return 1; }
+  echo mount-failed >"$d/r2.diag"
   return 1
 }
 
@@ -270,9 +274,9 @@ SyncHead() {
 Publish() {
   local note="$1"
   local json
-  json=$(printf '{"alive":true,"machine":"linux","run_id":"%s","check":"%s","url":"%s","ssh_url":"https://ssh.kun9.ccwu.cc","user":"root","ttl_min":%s,"opened":"%s","ends":"%s","named":"%s","restarts":%s,"rdp_diag":"%s","rdp_info":"%s","ssh_info":"%s","drive":"%s","dbg_url":"%s","dbg_diag":"%s","note":"%s"}' \
+  json=$(printf '{"alive":true,"machine":"linux","run_id":"%s","check":"%s","url":"%s","ssh_url":"https://ssh.kun9.ccwu.cc","user":"root","ttl_min":%s,"opened":"%s","ends":"%s","named":"%s","restarts":%s,"rdp_diag":"%s","rdp_info":"%s","ssh_info":"%s","disk":"%s","dbg_url":"%s","dbg_diag":"%s","note":"%s"}' \
     "$GITHUB_RUN_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DESKURL" "$MIN" "$OPENED" "$ENDS" "$CFPG" "$RESTARTS" \
-    "$DESKG" "vnc 127.0.0.1:$VNCPORT" "sshd 127.0.0.1:22 user=root" "$GDG" "$DBGURL" "$DBGPG" "$note")
+    "$DESKG" "vnc 127.0.0.1:$VNCPORT" "sshd 127.0.0.1:22 user=root" "$R2G" "$DBGURL" "$DBGPG" "$note")
   echo "LINUXD-JSON $json"
   local i
   for i in 1 2 3; do
@@ -298,16 +302,16 @@ log 'boot: tunnel'
 StartTunnel
 log 'boot: debug channel'
 StartDbgListener && StartDbgTunnel
-Publish 'booting: ssh+tunnel+dbg up, desktop and drive starting'
+Publish 'booting: ssh+tunnel+dbg up, desktop and disk starting'
 
-# The drive and the desktop both take a minute, and neither is a dependency of the other: a failed
+# The disk and the desktop both take a minute, and neither is a dependency of the other: a failed
 # install leaves a working SSH box with a mounted disk, a failed disk leaves a working desktop.
-( EnableDrive; log "drive: $(cat "$HOME/cf/gd.diag" 2>/dev/null)" ) & GDJOB=$!
+( EnableDisk; log "disk: $(cat "$HOME/cf/r2.diag" 2>/dev/null)" ) & R2JOB=$!
 ( EnableDesktop; log "desktop: $DESKG" ) & DESKJOB=$!
 # Bare `wait` would never return -- the tunnel and the debug listener are background jobs of this
 # same shell and run for the whole session, which would leave the machine up but unsupervised (no
 # heartbeat refresh, no panel stop). Wait on the two starters by pid.
-wait "$GDJOB"
+wait "$R2JOB"
 wait "$DESKJOB"
 
 # A background job cannot set a variable in its parent shell, so DESKG still holds whatever the
@@ -318,19 +322,19 @@ Probe() {
   if curl -s --max-time 3 -o /dev/null "http://127.0.0.1:$WEBPORT/vnc.html"; then DESKG='listening'
   elif [ "$DESKG" = listening ]; then DESKG='not-listening'; fi
   # A mount has an outside answer -- the mount table -- so it is never taken from the starter that
-  # ran it in a background job. That job only leaves its reason in a file, which is what GDG reads.
-  GDG=$(cat "$HOME/cf/gd.diag" 2>/dev/null || echo pending)
-  [ "$GDG" = mounted ] && { sudo mountpoint -q "$GDDIR" 2>/dev/null || GDG='unmounted'; }
+  # ran it in a background job. That job only leaves its reason in a file, which is what R2G reads.
+  R2G=$(cat "$HOME/cf/r2.diag" 2>/dev/null || echo pending)
+  [ "$R2G" = mounted ] && { sudo mountpoint -q "$R2DIR" 2>/dev/null || R2G='unmounted'; }
 }
 Probe
 
-Publish "desktop=$DESKG drive=$GDG dbg=$DBGPG"
-log "reachable: ssh root@ssh.kun9.ccwu.cc  desktop=${DESKURL:-none}  drive=$GDDIR  ttl=${MIN}m"
+Publish "desktop=$DESKG disk=$R2G dbg=$DBGPG"
+log "reachable: ssh root@ssh.kun9.ccwu.cc  desktop=${DESKURL:-none}  disk=$R2DIR  ttl=${MIN}m"
 
 # ---- supervise: keep the tunnel alive, obey the panel, refresh the heartbeat ----
 END_TS=$(date -u -d "+$SECS seconds" +%s 2>/dev/null || echo $(( $(date -u +%s) + SECS )))
 LASTP=0
-GDLAST=$(date -u +%s)
+R2LAST=$(date -u +%s)
 while [ "$(date -u +%s)" -lt "$END_TS" ]; do
   sleep 20
   CHANGED=0
@@ -371,19 +375,19 @@ while [ "$(date -u +%s)" -lt "$END_TS" ]; do
     EnableDesktop; CHANGED=1
   fi
 
-  # Drive: a FUSE mount can stall or its rclone can be killed, and unlike the desktop nobody opens it
+  # Disk: a FUSE mount can stall or its rclone can be killed, and unlike the desktop nobody opens it
   # by hand to notice. Retry on a timer, so a first boot that lost to a slow apt still ends up with
   # the disk mounted.
-  if ! sudo mountpoint -q "$GDDIR" 2>/dev/null && [ $(( $(date -u +%s) - GDLAST )) -ge 120 ]; then
-    GDLAST=$(date -u +%s)
-    log 'drive not mounted, retrying'
-    EnableDrive; CHANGED=1
+  if ! sudo mountpoint -q "$R2DIR" 2>/dev/null && [ $(( $(date -u +%s) - R2LAST )) -ge 120 ]; then
+    R2LAST=$(date -u +%s)
+    log 'disk not mounted, retrying'
+    EnableDisk; CHANGED=1
   fi
 
   if [ $(( $(date -u +%s) - LASTP )) -ge 60 ] || [ "$CHANGED" = 1 ]; then
     LASTP=$(date -u +%s)
     Probe
-    Publish "desktop=$DESKG drive=$GDG dbg=$DBGPG"
+    Publish "desktop=$DESKG disk=$R2G dbg=$DBGPG"
   fi
 done
 
