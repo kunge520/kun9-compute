@@ -374,7 +374,7 @@ LAUNCHER
   sudo tee /usr/share/applications/kun9-browser.desktop >/dev/null <<'ENTRY'
 [Desktop Entry]
 Type=Application
-Name=Web Browser
+Name=Web Browser (Chrome)
 GenericName=Browser
 Comment=Browse the web on this desktop
 Exec=/usr/local/bin/kun9-browser %U
@@ -385,15 +385,23 @@ ENTRY
   # 644, because tee would otherwise leave the file world-writable and its Exec is what root's menu click
   # runs.
   sudo chmod 644 /usr/share/applications/kun9-browser.desktop
-  # The image's own browser entries sit in the menu right next to this one -- Firefox, Chrome and Edge
-  # all show -- and every click on them lands on a refusal, so they are hidden: one working entry beats
-  # three where only one answers. NoDisplay goes after the first Type= line, which is inside the main
-  # entry; google-chrome.desktop has more sections and an append would land in the wrong one.
-  for f in /usr/share/applications/firefox.desktop /usr/share/applications/google-chrome.desktop \
-           /usr/share/applications/microsoft-edge.desktop /usr/share/applications/chromium-browser.desktop; do
+  # The image's own browser entries sit in the menu right next to this one and every click on them lands on
+  # a refusal, so they are hidden: one working entry beats four where only one answers. Which files those
+  # are cannot be hardcoded -- this image ships google-chrome.desktop AND com.google.Chrome.desktop (the
+  # AppStream id the .deb adds), and only the first name was known when this was written, so the menu entry
+  # literally called "Google Chrome" stayed visible and a click on it still died on the sandbox refusal.
+  # Match the executable instead: any entry whose Exec runs a browser gets hidden. NoDisplay goes after the
+  # first Type= line, which is inside the main entry; google-chrome.desktop has more sections and an append
+  # would land in the wrong one.
+  for f in /usr/share/applications/*.desktop; do
     [ -f "$f" ] || continue
-    sudo grep -q '^NoDisplay=' "$f" || \
-      sudo sed -i '0,/^Type=Application/s//Type=Application\nNoDisplay=true/' "$f"
+    case "$(basename "$f")" in kun9-browser.desktop) continue ;; esac
+    e=$(awk -F= '/^Exec=/{print $2; exit}' "$f" 2>/dev/null)
+    case "$e" in
+      *chrome*|*chromium*|*edge*|*firefox*|*epiphany*|*brave*|*vivaldi*)
+        sudo grep -q '^NoDisplay=' "$f" || \
+          sudo sed -i '0,/^Type=Application/s//Type=Application\nNoDisplay=true/' "$f" ;;
+    esac
   done
   # Written directly instead of through xdg-settings, which needs a session bus and would leave a dbus
   # daemon running behind it. Nothing exists at this path on a runner, so there is no section to merge.
