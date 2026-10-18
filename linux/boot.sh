@@ -377,6 +377,7 @@ Type=Application
 Name=Web Browser (Chrome)
 GenericName=Browser
 Comment=Browse the web on this desktop
+Keywords=web;browser;internet;chrome;google;chromium;
 Exec=/usr/local/bin/kun9-browser %U
 Icon=web-browser
 Terminal=false
