@@ -325,12 +325,10 @@ EnableDesktop() {
   # tunnel's vnc. route) as the only way in, with VncAuth as the gate. -AlwaysShared so a dropped tab
   # cannot leave the display locked.
   #
-  # The banner is the guard, not `pgrep -x Xvnc`: a process that is alive but no longer answering is the
-  # thing a repair has to replace, and pgrep calls it healthy forever. If it did have to be replaced,
-  # the session that was drawing on it goes with it -- and has to be killed, not left running attached to
-  # a dead display, or the starter below would see its pid and never launch a desktop. No lock cleanup is
-  # needed either way: Xvnc removes a stale /tmp/.X1-lock by itself when the pid inside it is dead, which
-  # is what a crash leaves behind (measured on a spare display).
+  # VncReady is the guard, not `pgrep -x Xvnc`: alive-but-not-answering is exactly what a repair has to
+  # replace, and pgrep calls that healthy forever. If it does get replaced the session drawing on it goes
+  # with it, so kill both -- a leftover xfce4-session would otherwise make the starter below skip launching.
+  # No lock cleanup needed: Xvnc removes a stale /tmp/.X1-lock on its own when the pid inside is dead.
   local i xvnc=1 started=0
   VncReady || xvnc=0
   if [ "$xvnc" = 0 ]; then
@@ -344,6 +342,13 @@ EnableDesktop() {
     for i in $(seq 1 15); do VncReady && break; sleep 1; done
   fi
   VncReady || { DESKG='no-xvnc'; return 1; }
+  # Xvnc makes /tmp/.X11-unix/X1 world-writable, and this image ships an unprivileged `runner` account, so
+  # anything running there could watch his screen and type as root. Connecting over a unix socket needs
+  # write on the inode, so 0700 closes it -- the dir stays 1777 because clients resolve the path through it,
+  # and nothing breaks: the desktop, kun9-browser and xset all reach the display as root, and websockify
+  # uses TCP 5901, not the socket. Re-applied per pass because a recreated display resets it.
+  sudo chmod 700 /tmp/.X11-unix/X1 2>/dev/null
+  sudo chmod 600 /root/.Xauthority 2>/dev/null
   # Before the session starts, so the menu already has the entry when the desktop first draws.
   BrowserLauncher
   # XDG_CONFIG_HOME must be pinned. The runner image exports it as /home/runner/.config and sudo keeps it,
