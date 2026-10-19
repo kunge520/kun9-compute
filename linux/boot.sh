@@ -308,8 +308,19 @@ EnableDesktop() {
   ss -tln 2>/dev/null | grep -q ":$VNCPORT " || { DESKG='no-xvnc'; return 1; }
   # Before the session starts, so the menu already has the entry when the desktop first draws.
   BrowserLauncher
-  pgrep -x xfce4-session >/dev/null || sudo bash -c \
-    "nohup env DISPLAY=:1 HOME=/root USER=root XDG_RUNTIME_DIR=/run/user/0 startxfce4 >/root/wm.log 2>&1 &"
+  # XDG_CONFIG_HOME must be pinned. The runner image exports it as /home/runner/.config and sudo keeps it,
+  # so the session -- HOME and every file it writes belong to root, but its idea of a default browser lived
+  # in runner's home, where nothing declares one. That is why the panel's Web Browser button answered
+  # nothing at all for two boots running: its Exec is a lookup, not a browser.
+  local started=0
+  if ! pgrep -x xfce4-session >/dev/null; then
+    started=1
+    sudo bash -c \
+      "nohup env DISPLAY=:1 HOME=/root USER=root XDG_RUNTIME_DIR=/run/user/0 \
+       XDG_CONFIG_HOME=/root/.config startxfce4 >/root/wm.log 2>&1 &"
+  fi
+  # Only for a session this boot started: a window he closes by hand stays closed.
+  [ "$started" = 1 ] && BrowserOpen
   pgrep -x websockify >/dev/null || nohup /usr/bin/websockify --web=/usr/share/novnc \
     "127.0.0.1:$WEBPORT" "127.0.0.1:$VNCPORT" >"$HOME/cf/ws.log" 2>&1 &
   for i in $(seq 1 8); do
@@ -413,10 +424,56 @@ x-scheme-handler/http=kun9-browser.desktop
 x-scheme-handler/https=kun9-browser.desktop
 www-browser=kun9-browser.desktop
 MIME
+  # exo-open does not consult mimeapps.list for its --launch WebBrowser: it reads its own helper file. Left
+  # out, that lookup falls back to whatever the image's alternatives point at -- microsoft-edge here, which
+  # refuses to run as root, and the click does nothing.
+  sudo mkdir -p /root/.config/xfce4
+  sudo tee /root/.config/xfce4/helpers.rc >/dev/null <<'HELPERS'
+[General]
+WebBrowser=kun9-browser
+HELPERS
+  sudo chmod 644 /root/.config/xfce4/helpers.rc
+  # Same reason at the alias level, for anything that shells out for a browser by name.
+  [ -L /etc/alternatives/x-www-browser ] && \
+    sudo ln -sfn /usr/local/bin/kun9-browser /etc/alternatives/x-www-browser
+  # And the buttons themselves: the panel keeps a private .desktop copy per launcher, and the one shipped
+  # in this image launches a lookup rather than a browser. Rewrite the copy wherever a session has already
+  # made one, so no click can depend on the resolution above being understood. Enumerated under sudo,
+  # because those directories are root's and 700 -- an unprivileged glob quietly matches nothing.
+  sudo find /root/.config/xfce4/panel /home/runner/.config/xfce4/panel -name '*.desktop' 2>/dev/null | while read -r f; do
+    sudo grep -q 'exo-open --launch WebBrowser' "$f" && \
+      sudo sed -i 's|^Exec=.*|Exec=/usr/local/bin/kun9-browser %u|' "$f"
+  done
   BRG=$(bash "$w" --probe 2>/dev/null)
   echo "${BRG:-missing}" >"$d/br.diag"
   log "browser launcher -> ${BRG:-missing}"
   [ -n "$BRG" ] && [ "$BRG" != missing ]
+}
+
+# Open the window at boot instead of waiting for a click. Every route to a browser on this desktop --
+# panel button, menu entry, x-www-browser, an https link inside the session -- goes through a default
+# resolution that this image can answer with nothing, and from his side all of them look identical:
+# "the browser will not open". A window already on the display when he connects cannot be missed, and the
+# menu entry stays for the second window.
+#
+# The heartbeat says what it checked: browser=chrome only ever proved a binary was installed, which is how
+# a box with no reachable browser still reported itself healthy for two boots.
+BrowserOpen() {
+  local d="$HOME/cf" i n
+  for i in $(seq 1 20); do
+    pgrep -x xfce4-session >/dev/null && break
+    sleep 1
+  done
+  sudo /usr/local/bin/kun9-browser >/dev/null 2>&1
+  sleep 5
+  n=$(pgrep -c chrome 2>/dev/null)
+  if [ "${n:-0}" -gt 0 ]; then
+    echo chrome-open >"$d/br.diag"
+    log "browser window open, $n processes"
+  else
+    echo chrome-fail >"$d/br.diag"
+    log "browser did not start: $(sudo tail -n 2 /root/browser.log 2>/dev/null | tr '\n' ' ')"
+  fi
 }
 
 # ---- heartbeat: same file shape the panel already reads for winterm ----
