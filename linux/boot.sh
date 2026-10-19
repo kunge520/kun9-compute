@@ -330,15 +330,13 @@ EnableDesktop() {
   fi
   # Root owns the display because root is the account he logs in as, and a desktop run by anyone else
   # would show him a different home. /run/user/0 does not exist on a runner and xfce4 complains without it.
-  sudo mkdir -p /root/.vnc /run/user/0
+  sudo mkdir -p /run/user/0
   sudo chmod 700 /run/user/0
-  # vncpasswd is the only writer of that file's odd 8-byte DES form, so the one credential everything
-  # else uses is piped in rather than hand-rolled.
-  printf '%s\n%s\n' "$WT_RDP_PASS" "$WT_RDP_PASS" | sudo vncpasswd /root/.vnc/passwd >/dev/null 2>&1
-  sudo chmod 600 /root/.vnc/passwd
-  # -localhost: 5901 is reachable from this box only, which leaves websockify (and through it the
-  # tunnel's vnc. route) as the only way in, with VncAuth as the gate. -AlwaysShared so a dropped tab
-  # cannot leave the display locked.
+  # -localhost: 5901 is reachable from this box only, which leaves websockify (and through it the tunnel's
+  # vnc. route) as the only way in. -SecurityTypes None on purpose, his call (稳定优先): Cloudflare Access
+  # with an owner-only policy is the gate that actually keeps strangers out, and the box is destroyed every
+  # run, so a second password here only adds a thing to mistype -- every failed attempt used to be one step
+  # from the lockout below. -AlwaysShared so a dropped tab cannot leave the display locked.
   # -UseBlacklist=0 is what makes the desktop stay usable. TigerVNC counts unauthenticated connection
   # attempts per host and temporarily rejects that host -- but websockify always dials in as 127.0.0.1, so
   # the host being punished is the only address the machine has. A mistyped password, noVNC's own
@@ -360,18 +358,11 @@ EnableDesktop() {
     sleep 2
     sudo bash -c \
       "nohup env HOME=/root XDG_RUNTIME_DIR=/run/user/0 /usr/bin/Xvnc :1 -geometry 1280x800 -depth 24 \
-       -SecurityTypes VncAuth -PasswordFile /root/.vnc/passwd -localhost yes -rfbport $VNCPORT \
+       -SecurityTypes None -localhost yes -rfbport $VNCPORT \
        -AlwaysShared -UseBlacklist=0 >/root/xvnc.log 2>&1 &"
     for i in $(seq 1 15); do VncReady && break; sleep 1; done
   fi
   VncReady || { DESKG='no-xvnc'; return 1; }
-  # Xvnc makes /tmp/.X11-unix/X1 world-writable, and this image runs its job as an unprivileged `runner`
-  # account, so anything there could attach to :1 and read his screen or type as root. Connecting over a
-  # unix socket needs write on the inode, so 0700 closes it -- measured on the next boot: runner now gets
-  # EACCES while root's own xset/Xvnc still work. The directory stays 1777 so clients still resolve the
-  # path, and websockify is unaffected because it reaches the display over TCP 5901, not the socket.
-  # Re-applied on every pass because a recreated display resets it.
-  sudo chmod 700 /tmp/.X11-unix/X1 2>/dev/null
   # Before the session starts, so the menu already has the entry when the desktop first draws.
   BrowserLauncher
   # XDG_CONFIG_HOME must be pinned. The runner image exports it as /home/runner/.config and sudo keeps it,
