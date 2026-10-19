@@ -417,6 +417,8 @@ ENTRY
   done
   # Written directly instead of through xdg-settings, which needs a session bus and would leave a dbus
   # daemon running behind it. Nothing exists at this path on a runner, so there is no section to merge.
+  # This is what makes a link clicked inside the desktop land here: glib's answer for
+  # x-scheme-handler/https is kun9-browser.desktop because of these lines and nothing else.
   sudo mkdir -p /root/.config
   [ -f /root/.config/mimeapps.list ] || sudo tee /root/.config/mimeapps.list >/dev/null <<'MIME'
 [Default Applications]
@@ -424,26 +426,10 @@ x-scheme-handler/http=kun9-browser.desktop
 x-scheme-handler/https=kun9-browser.desktop
 www-browser=kun9-browser.desktop
 MIME
-  # exo-open does not consult mimeapps.list for its --launch WebBrowser: it reads its own helper file. Left
-  # out, that lookup falls back to whatever the image's alternatives point at -- microsoft-edge here, which
-  # refuses to run as root, and the click does nothing.
-  sudo mkdir -p /root/.config/xfce4
-  sudo tee /root/.config/xfce4/helpers.rc >/dev/null <<'HELPERS'
-[General]
-WebBrowser=kun9-browser
-HELPERS
-  sudo chmod 644 /root/.config/xfce4/helpers.rc
-  # Same reason at the alias level, for anything that shells out for a browser by name.
+  # Anything that shells out for a browser by name gets this launcher too, instead of the Edge binary the
+  # image points the alias at.
   [ -L /etc/alternatives/x-www-browser ] && \
     sudo ln -sfn /usr/local/bin/kun9-browser /etc/alternatives/x-www-browser
-  # And the buttons themselves: the panel keeps a private .desktop copy per launcher, and the one shipped
-  # in this image launches a lookup rather than a browser. Rewrite the copy wherever a session has already
-  # made one, so no click can depend on the resolution above being understood. Enumerated under sudo,
-  # because those directories are root's and 700 -- an unprivileged glob quietly matches nothing.
-  sudo find /root/.config/xfce4/panel /home/runner/.config/xfce4/panel -name '*.desktop' 2>/dev/null | while read -r f; do
-    sudo grep -q 'exo-open --launch WebBrowser' "$f" && \
-      sudo sed -i 's|^Exec=.*|Exec=/usr/local/bin/kun9-browser %u|' "$f"
-  done
   BRG=$(bash "$w" --probe 2>/dev/null)
   echo "${BRG:-missing}" >"$d/br.diag"
   log "browser launcher -> ${BRG:-missing}"
@@ -459,12 +445,35 @@ HELPERS
 # The heartbeat says what it checked: browser=chrome only ever proved a binary was installed, which is how
 # a box with no reachable browser still reported itself healthy for two boots.
 BrowserOpen() {
-  local d="$HOME/cf" i n
+  local d="$HOME/cf" i n b p
   for i in $(seq 1 20); do
     pgrep -x xfce4-session >/dev/null && break
     sleep 1
   done
-  sudo /usr/local/bin/kun9-browser >/dev/null 2>&1
+  # The panel keeps a private copy of its Web Browser button and writes it when the session starts, which
+  # is why this belongs here and not in BrowserLauncher. What the image puts in it is `exo-open --launch
+  # WebBrowser`, and that lookup was measured on a live desktop to start nothing at all for this launcher
+  # even when exo's helper file and the mime default both name it -- the same entry launched the ordinary
+  # way starts Chrome every time. So the button gets the Exec, with no lookup left in it. Root owns those
+  # directories and they are 700, so the walk has to be sudo's: an unprivileged glob matches nothing and
+  # says nothing.
+  p="$d/br.patched"; : >"$p"
+  sudo find /root/.config/xfce4/panel /home/runner/.config/xfce4/panel -name '*.desktop' 2>/dev/null |
+  while read -r f; do
+    sudo grep -q 'exo-open --launch WebBrowser' "$f" && \
+      { sudo sed -i 's|^Exec=.*|Exec=/usr/local/bin/kun9-browser %u|' "$f"; echo x >>"$p"; }
+  done
+  # The button is read once, when the panel builds it, so a panel that is already up has to be restarted --
+  # only when a file actually changed, and before the window opens, so the flicker is over by the time he
+  # connects.
+  if [ -s "$p" ]; then
+    b=$(sudo cat "/proc/$(pgrep -x xfce4-panel | head -1)/environ" 2>/dev/null | tr '\0' '\n' |
+      grep -m1 '^DBUS_SESSION_BUS_ADDRESS=' | cut -d= -f2-)
+    [ -n "$b" ] && sudo env DISPLAY=:1 HOME=/root USER=root XDG_RUNTIME_DIR=/run/user/0 \
+      DBUS_SESSION_BUS_ADDRESS="$b" xfce4-panel -r >/dev/null 2>&1 </dev/null
+    sleep 3
+  fi
+  sudo /usr/local/bin/kun9-browser >/dev/null 2>&1 </dev/null
   sleep 5
   n=$(pgrep -c chrome 2>/dev/null)
   if [ "${n:-0}" -gt 0 ]; then
@@ -472,7 +481,7 @@ BrowserOpen() {
     log "browser window open, $n processes"
   else
     echo chrome-fail >"$d/br.diag"
-    log "browser did not start: $(sudo tail -n 2 /root/browser.log 2>/dev/null | tr '\n' ' ')"
+    log "browser did not start"
   fi
 }
 
