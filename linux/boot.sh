@@ -60,7 +60,7 @@ ENDS=$(date -u -d "+$SECS seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%
 RESTARTS=0
 PUB=''
 NOTEG='ssh up'
-DESKG='not-installed'   # listening | no-web | no-xvnc | no-wm | not-installed -- see DesktopBad
+DESKG='not-installed'   # listening | no-web | no-xvnc | no-auth | no-wm | not-installed -- see DesktopBad
 # Read back from a file like R2G below: the launcher is installed inside the desktop starter, which runs
 # as a background job and cannot set a variable here.
 BRG='pending'
@@ -281,25 +281,40 @@ EnableDisk() {
 # One curl of /vnc.html used to be the whole health check, and that page is a file on disk: websockify
 # answers it whether or not anything is listening behind it to proxy to. Measured on the live box with a
 # spare instance pointed at a closed port -- code 200, so both Probe() and the supervise loop called a
-# desktop nobody can use "listening" and never repaired it. Xvnc sends its RFB banner the moment it
-# accepts, before any authentication, so reading those 12 bytes is the cheap question that really means
-# "a screen can be drawn here".
+# desktop nobody can use "listening" and never repaired it. So each layer is now asked what it is for:
+# the page for websockify, a real RFB security-type list for Xvnc, the pid for the session.
 WebReady() { curl -s --max-time 3 -o /dev/null "http://127.0.0.1:$WEBPORT/vnc.html"; }
-VncReady() {
+# ok | down | blocked. TigerVNC answers a blacklisted host by *downgrading the negotiation*: it sends
+# "RFB 003.003", a security-type count of zero and the plain-text reason "Too many security failures", and
+# an healthy 1.13 always answers 3.7/3.8 with at least one type. So the version line is the tell and a zero
+# count is the backstop -- reading only "does it start with RFB" calls a display that refuses everyone
+# ready. Asking is only safe because blacklisting is off below: an unauthenticated probe counts as one of
+# the attempts that triggers it.
+VncState() {
   timeout 6 python3 -c 'import socket, sys
 try:
     s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), 4)
-    ok = s.recv(12).startswith(b"RFB")
+    s.settimeout(4)
+    head = s.recv(16)
+    if not head.startswith(b"RFB"):
+        st = "down"
+    elif head.startswith(b"RFB 003.003"):
+        st = "blocked"
+    else:
+        s.sendall(b"RFB 003.008\n")
+        body = s.recv(8)
+        st = "blocked" if body[:4] == b"\x00\x00\x00\x00" else "ok"
     s.close()
 except Exception:
-    ok = False
-sys.exit(0 if ok else 1)' "$VNCPORT"
+    st = "down"
+sys.stdout.write(st)' "$VNCPORT"
 }
+VncReady() { [ "$(VncState)" = ok ]; }
 # The first layer that is not up, or an empty answer when all three are. Probe() and the supervise loop
 # both call this, so the word he reads in the panel is the same fact that decided whether to repair.
 DesktopBad() {
   WebReady || { echo no-web; return; }
-  VncReady || { echo no-xvnc; return; }
+  case "$(VncState)" in down) echo no-xvnc; return;; blocked) echo no-auth; return;; esac
   pgrep -x xfce4-session >/dev/null || { echo no-wm; return; }
   echo ''
 }
@@ -324,11 +339,19 @@ EnableDesktop() {
   # -localhost: 5901 is reachable from this box only, which leaves websockify (and through it the
   # tunnel's vnc. route) as the only way in, with VncAuth as the gate. -AlwaysShared so a dropped tab
   # cannot leave the display locked.
+  # -UseBlacklist=0 is what makes the desktop stay usable. TigerVNC counts unauthenticated connection
+  # attempts per host and temporarily rejects that host -- but websockify always dials in as 127.0.0.1, so
+  # the host being punished is the only address the machine has. A mistyped password, noVNC's own
+  # reconnect loop, or this script's health probe blacklists 127.0.0.1 and every browser then fails with
+  # "Too many security failures" until the display is restarted, which is the intermittence he kept
+  # hitting. The feature exists to stop a remote brute-force sweep; behind Access, on loopback, it can
+  # only ever shoot the legitimate user in the foot.
   #
-  # VncReady is the guard, not `pgrep -x Xvnc`: alive-but-not-answering is exactly what a repair has to
-  # replace, and pgrep calls that healthy forever. If it does get replaced the session drawing on it goes
-  # with it, so kill both -- a leftover xfce4-session would otherwise make the starter below skip launching.
-  # No lock cleanup needed: Xvnc removes a stale /tmp/.X1-lock on its own when the pid inside is dead.
+  # The type list is the guard, not `pgrep -x Xvnc`: a process that is alive but refusing everyone is the
+  # thing a repair has to replace, and pgrep calls that healthy forever. If it does get replaced the
+  # session drawing on it goes with it, so kill both -- a leftover xfce4-session would otherwise make the
+  # starter below skip launching. No lock cleanup needed: Xvnc removes a stale /tmp/.X1-lock on its own
+  # when the pid inside is dead.
   local i xvnc=1 started=0
   VncReady || xvnc=0
   if [ "$xvnc" = 0 ]; then
@@ -338,7 +361,7 @@ EnableDesktop() {
     sudo bash -c \
       "nohup env HOME=/root XDG_RUNTIME_DIR=/run/user/0 /usr/bin/Xvnc :1 -geometry 1280x800 -depth 24 \
        -SecurityTypes VncAuth -PasswordFile /root/.vnc/passwd -localhost yes -rfbport $VNCPORT \
-       -AlwaysShared >/root/xvnc.log 2>&1 &"
+       -AlwaysShared -UseBlacklist=0 >/root/xvnc.log 2>&1 &"
     for i in $(seq 1 15); do VncReady && break; sleep 1; done
   fi
   VncReady || { DESKG='no-xvnc'; return 1; }

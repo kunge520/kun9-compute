@@ -682,7 +682,7 @@ function app() {
     "function say(m,bad){var e=$('msg');e.textContent=m||'';e.className='msg'+(bad?' err':'')}",
     // The box reports raw service states; the panel says one human thing about each and keeps the rest
     // inside 详细信息, which is where the exact values still show for anyone debugging a boot.
-    "var DIAG={listening:'已就绪',running:'已连接','not-installed':'正在安装','not-listening':'已停止','no-listener':'监听进程掉了','no-tunnel-url':'拿不到网址','no-web':'网页代理没应答','no-xvnc':'显示服务没应答','no-wm':'桌面会话没起来',up:'已接通','no-pass':'缺少口令','no-key':'缺少密钥',down:'已停止',booting:'正在启动',mounted:'已挂载',pending:'挂载中',unmounted:'挂载掉了',armed:'已就绪，等首次连接桌面','wrong-session':'挂在别的会话','bad-key':'R2 密钥不被接受','rclone-dl-fail':'rclone 下载失败','rclone-missing':'rclone 缺失','no-fuse':'缺 fuse','winfsp-dl-fail':'磁盘驱动下载失败','mount-failed':'挂载失败'};",
+    "var DIAG={listening:'已就绪',running:'已连接','not-installed':'正在安装','not-listening':'已停止','no-listener':'监听进程掉了','no-tunnel-url':'拿不到网址','no-web':'网页代理没应答','no-xvnc':'显示服务没应答','no-auth':'暂时拒绝连接','no-wm':'桌面会话没起来',up:'已接通','no-pass':'缺少口令','no-key':'缺少密钥',down:'已停止',booting:'正在启动',mounted:'已挂载',pending:'挂载中',unmounted:'挂载掉了',armed:'已就绪，等首次连接桌面','wrong-session':'挂在别的会话','bad-key':'R2 密钥不被接受','rclone-dl-fail':'rclone 下载失败','rclone-missing':'rclone 缺失','no-fuse':'缺 fuse','winfsp-dl-fail':'磁盘驱动下载失败','mount-failed':'挂载失败'};",
     // One view, two machines. M is the selected machine and every call carries it. The SSH link is the
     // same for both boxes because they share the tunnel and the hostname; the desktop link is not --
     // Windows goes to the fixed Access RDP app, Linux to the noVNC URL it publishes each boot.
