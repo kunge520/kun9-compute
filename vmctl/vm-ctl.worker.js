@@ -267,10 +267,16 @@ export default {
         // The flag holds busy() across the bring-up and the machine's first /api/power poll clears it;
         // 1200 s is slack for a runner that dies during setup, not an expected wait.
         await env.STORE.put(m.bt, '1', { expirationTtl: 1200 });
-        // Measured on both boxes, dispatch -> first heartbeat is about a minute: Linux publishes at
-        // +11 s with its desktop listening by +49 s, Windows at +51 s. The only real variance is GitHub
-        // handing out a runner.
-        return send(JSON.stringify({ ok: true, note: '已触发，一般 1 分钟左右就绪，GitHub 繁忙时排队更久' }), 'application/json');
+        // Re-measured on the live box 2026-10-19, dispatch -> first heartbeat: Linux publishes at +11 s but
+        // its desktop does not answer until +3m33s (stat of the first proxied WebSocket vs the job start),
+        // because XFCE/tigervnc/noVNC are installed by apt on every boot. Windows is up in about a minute.
+        // So the wait to promise differs per machine -- and 桌面 is the part that is slow, not 终端.
+        return send(JSON.stringify({
+          ok: true,
+          note: m === MACH.linux
+            ? '已触发：终端约 1 分钟能用，桌面约 3-4 分钟（Ubuntu 每次开机都要现装桌面），GitHub 繁忙时排队更久'
+            : '已触发，一般 1 分钟左右就绪，GitHub 繁忙时排队更久',
+        }), 'application/json');
       }
       // A second 关机 within a minute is the same request, so remember what is already pending
       // before overwriting it: only a request the machine sat on earns a hard cancel.
@@ -676,7 +682,7 @@ function app() {
     "function say(m,bad){var e=$('msg');e.textContent=m||'';e.className='msg'+(bad?' err':'')}",
     // The box reports raw service states; the panel says one human thing about each and keeps the rest
     // inside 详细信息, which is where the exact values still show for anyone debugging a boot.
-    "var DIAG={listening:'已就绪',running:'已连接','not-installed':'未安装','not-listening':'已停止','no-listener':'监听进程掉了','no-tunnel-url':'拿不到网址',up:'已接通','no-pass':'缺少口令','no-key':'缺少密钥',down:'已停止',booting:'正在启动',mounted:'已挂载',pending:'挂载中',unmounted:'挂载掉了',armed:'已就绪，等首次连接桌面','wrong-session':'挂在别的会话','bad-key':'R2 密钥不被接受','rclone-dl-fail':'rclone 下载失败','rclone-missing':'rclone 缺失','no-fuse':'缺 fuse','winfsp-dl-fail':'磁盘驱动下载失败','mount-failed':'挂载失败'};",
+    "var DIAG={listening:'已就绪',running:'已连接','not-installed':'正在安装','not-listening':'已停止','no-listener':'监听进程掉了','no-tunnel-url':'拿不到网址','no-web':'网页代理没应答','no-xvnc':'显示服务没应答','no-wm':'桌面会话没起来',up:'已接通','no-pass':'缺少口令','no-key':'缺少密钥',down:'已停止',booting:'正在启动',mounted:'已挂载',pending:'挂载中',unmounted:'挂载掉了',armed:'已就绪，等首次连接桌面','wrong-session':'挂在别的会话','bad-key':'R2 密钥不被接受','rclone-dl-fail':'rclone 下载失败','rclone-missing':'rclone 缺失','no-fuse':'缺 fuse','winfsp-dl-fail':'磁盘驱动下载失败','mount-failed':'挂载失败'};",
     // One view, two machines. M is the selected machine and every call carries it. The SSH link is the
     // same for both boxes because they share the tunnel and the hostname; the desktop link is not --
     // Windows goes to the fixed Access RDP app, Linux to the noVNC URL it publishes each boot.
@@ -688,7 +694,7 @@ function app() {
     "'GitHub 分配机器一般几秒，繁忙时才会排队'," +
     "'正在装 Git 和 cloudflared，装完才连得上隧道'," +
     "'隧道握手完成后，桌面和终端就都通了'," +
-    "'实测一分钟左右机器就通了，桌面再多半分钟'," +
+    "'终端大约 1 分钟就通了；Ubuntu 的桌面每次开机现装，还要再等约 3 分钟'," +
     "'开机期间再按一次开机没有用，按钮会自己变灰'," +
     "'开机自动挂上 R2 网盘，写进盘里的文件不会随关机丢'," +
     "'桌面和终端都是浏览器直连，不用装任何客户端'," +
@@ -734,7 +740,13 @@ function app() {
     " $('note').innerHTML=L.join('<br>');",
     " $('log').href=u.url||'https://github.com/kunge520/kun9-compute/actions';",
     " $('bssh').disabled=!alive;",
-    " $('brdp').disabled=!alive||(M==='linux'&&!VURL);",
+    // Ubuntu has no desktop in the runner image and apt installs XFCE every single boot, so the heartbeat
+    // is alive about three minutes before anything answers the VNC port -- and a click inside that window
+    // landed on a Cloudflare 530, which reads exactly like a broken desktop. Until the box reports the
+    // display itself ready, say what is still missing on the button instead of opening an error page.
+    " var dbad=alive&&M==='linux'&&(!VURL||v.rdp!=='listening');",
+    " $('brdp').disabled=!alive||dbad;",
+    " $('brdp').textContent=dbad?('桌面'+(DIAG[v.rdp]||'还没就绪')):'打开桌面';",
     " $('bstart').disabled=!!(alive||runLive);",
     " $('bstop').disabled=!(alive||runLive)&&!(q&&q.action==='stop');",
     " $('tok').textContent=r.has_token?'已配令牌':'未配令牌，开机不可用';",

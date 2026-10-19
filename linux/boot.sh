@@ -60,7 +60,7 @@ ENDS=$(date -u -d "+$SECS seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%
 RESTARTS=0
 PUB=''
 NOTEG='ssh up'
-DESKG='not-installed'
+DESKG='not-installed'   # listening | no-web | no-xvnc | no-wm | not-installed -- see DesktopBad
 # Read back from a file like R2G below: the launcher is installed inside the desktop starter, which runs
 # as a background job and cannot set a variable here.
 BRG='pending'
@@ -276,6 +276,34 @@ EnableDisk() {
 # the framebuffer crosses a plain WebSocket and noVNC is the very renderer Cloudflare itself uses for
 # browser VNC. A quick tunnel also needs no account permission, unlike a new hostname on kun9-wt --
 # the tunnel's ingress cannot be written with this token.
+#
+# ---- the three layers the desktop needs, each asked the way his browser asks it ----
+# One curl of /vnc.html used to be the whole health check, and that page is a file on disk: websockify
+# answers it whether or not anything is listening behind it to proxy to. Measured on the live box with a
+# spare instance pointed at a closed port -- code 200, so both Probe() and the supervise loop called a
+# desktop nobody can use "listening" and never repaired it. Xvnc sends its RFB banner the moment it
+# accepts, before any authentication, so reading those 12 bytes is the cheap question that really means
+# "a screen can be drawn here".
+WebReady() { curl -s --max-time 3 -o /dev/null "http://127.0.0.1:$WEBPORT/vnc.html"; }
+VncReady() {
+  timeout 6 python3 -c 'import socket, sys
+try:
+    s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), 4)
+    ok = s.recv(12).startswith(b"RFB")
+    s.close()
+except Exception:
+    ok = False
+sys.exit(0 if ok else 1)' "$VNCPORT"
+}
+# The first layer that is not up, or an empty answer when all three are. Probe() and the supervise loop
+# both call this, so the word he reads in the panel is the same fact that decided whether to repair.
+DesktopBad() {
+  WebReady || { echo no-web; return; }
+  VncReady || { echo no-xvnc; return; }
+  pgrep -x xfce4-session >/dev/null || { echo no-wm; return; }
+  echo ''
+}
+
 EnableDesktop() {
   if [ ! -x /usr/bin/Xvnc ]; then
     log 'installing xfce4 + tigervnc + novnc (this is the slow part)'
@@ -296,35 +324,54 @@ EnableDesktop() {
   # -localhost: 5901 is reachable from this box only, which leaves websockify (and through it the
   # tunnel's vnc. route) as the only way in, with VncAuth as the gate. -AlwaysShared so a dropped tab
   # cannot leave the display locked.
-  pgrep -x Xvnc >/dev/null || sudo bash -c \
-    "nohup env HOME=/root XDG_RUNTIME_DIR=/run/user/0 /usr/bin/Xvnc :1 -geometry 1280x800 -depth 24 \
-     -SecurityTypes VncAuth -PasswordFile /root/.vnc/passwd -localhost yes -rfbport $VNCPORT \
-     -AlwaysShared >/root/xvnc.log 2>&1 &"
-  local i
-  for i in $(seq 1 10); do
-    ss -tln 2>/dev/null | grep -q ":$VNCPORT " && break
-    sleep 1
-  done
-  ss -tln 2>/dev/null | grep -q ":$VNCPORT " || { DESKG='no-xvnc'; return 1; }
+  #
+  # The banner is the guard, not `pgrep -x Xvnc`: a process that is alive but no longer answering is the
+  # thing a repair has to replace, and pgrep calls it healthy forever. If it did have to be replaced,
+  # the session that was drawing on it goes with it -- and has to be killed, not left running attached to
+  # a dead display, or the starter below would see its pid and never launch a desktop. No lock cleanup is
+  # needed either way: Xvnc removes a stale /tmp/.X1-lock by itself when the pid inside it is dead, which
+  # is what a crash leaves behind (measured on a spare display).
+  local i xvnc=1 started=0
+  VncReady || xvnc=0
+  if [ "$xvnc" = 0 ]; then
+    sudo pkill -x Xvnc 2>/dev/null
+    sudo pkill -x xfce4-session 2>/dev/null
+    sleep 2
+    sudo bash -c \
+      "nohup env HOME=/root XDG_RUNTIME_DIR=/run/user/0 /usr/bin/Xvnc :1 -geometry 1280x800 -depth 24 \
+       -SecurityTypes VncAuth -PasswordFile /root/.vnc/passwd -localhost yes -rfbport $VNCPORT \
+       -AlwaysShared >/root/xvnc.log 2>&1 &"
+    for i in $(seq 1 15); do VncReady && break; sleep 1; done
+  fi
+  VncReady || { DESKG='no-xvnc'; return 1; }
   # Before the session starts, so the menu already has the entry when the desktop first draws.
   BrowserLauncher
   # XDG_CONFIG_HOME must be pinned. The runner image exports it as /home/runner/.config and sudo keeps it,
   # so the session -- HOME and every file it writes belong to root, but its idea of a default browser lived
   # in runner's home, where nothing declares one. That is why the panel's Web Browser button answered
   # nothing at all for two boots running: its Exec is a lookup, not a browser.
-  local started=0
   if ! pgrep -x xfce4-session >/dev/null; then
     started=1
     sudo bash -c \
       "nohup env DISPLAY=:1 HOME=/root USER=root XDG_RUNTIME_DIR=/run/user/0 \
        XDG_CONFIG_HOME=/root/.config startxfce4 >/root/wm.log 2>&1 &"
   fi
-  # Only for a session this boot started: a window he closes by hand stays closed.
+  # X's own screen saver is armed by the X server, at 600 s with blanking, and nothing on this desktop
+  # inhibits it -- no xfce4-screensaver, no power manager, no locker (measured: all three absent). Ten
+  # idle minutes into a lesson the canvas goes black and reads exactly like a broken VNC. Set after the
+  # session, never before, or the session start is the thing that undoes it; re-applied on every pass
+  # because a recreated display loses it.
+  sudo env DISPLAY=:1 HOME=/root XDG_RUNTIME_DIR=/run/user/0 xset s off >/dev/null 2>&1
+  # Only for a session this pass started: a window he closes by hand stays closed.
   [ "$started" = 1 ] && BrowserOpen
-  pgrep -x websockify >/dev/null || nohup /usr/bin/websockify --web=/usr/share/novnc \
-    "127.0.0.1:$WEBPORT" "127.0.0.1:$VNCPORT" >"$HOME/cf/ws.log" 2>&1 &
+  # Same guard-as-health for the proxy: `pgrep -x websockify` matches any websockify, including the
+  # forked per-connection child, so it can report the listener alive while nothing answers 6080.
+  if ! WebReady; then
+    nohup /usr/bin/websockify --web=/usr/share/novnc \
+      "127.0.0.1:$WEBPORT" "127.0.0.1:$VNCPORT" >"$HOME/cf/ws.log" 2>&1 &
+  fi
   for i in $(seq 1 8); do
-    curl -s --max-time 3 -o /dev/null "http://127.0.0.1:$WEBPORT/vnc.html" && return 0
+    WebReady && { DESKG='listening'; return 0; }
     sleep 2
   done
   DESKG='no-web'
@@ -549,12 +596,15 @@ wait "$R2JOB"
 wait "$DESKJOB"
 
 # A background job cannot set a variable in its parent shell, so DESKG still holds whatever the
-# install left in it. Read the truth back from the system instead: the local page needs Xvnc, xfce
-# and websockify all at once. A diagnosis that came from the install itself (apt-fail) is kept:
-# only the never-ran/stale states get rewritten.
+# install left in it. Read the truth back from the system instead, one layer at a time -- and the page
+# alone is not the truth, because websockify serves it with no display behind it (DesktopBad).
+# A diagnosis that came from the install itself (apt-fail) is kept: only the never-ran/stale states get
+# rewritten.
 Probe() {
-  if curl -s --max-time 3 -o /dev/null "http://127.0.0.1:$WEBPORT/vnc.html"; then DESKG='listening'
-  elif [ "$DESKG" = listening ]; then DESKG='not-listening'; fi
+  local bad
+  bad=$(DesktopBad)
+  if [ -z "$bad" ]; then DESKG='listening'
+  elif [ "$DESKG" != apt-fail ]; then DESKG="$bad"; fi
   # A mount has an outside answer -- the mount table -- so it is never taken from the starter that
   # ran it in a background job. That job only leaves its reason in a file, which is what R2G reads.
   R2G=$(cat "$HOME/cf/r2.diag" 2>/dev/null || echo pending)
@@ -611,10 +661,13 @@ while [ "$(date -u +%s)" -lt "$END_TS" ]; do
     StartDbgTunnel; CHANGED=1
   fi
 
-  # Desktop: Xvnc, xfce and websockify, all probed through the one page that needs all three. The
-  # route to it is the tunnel's own and is checked by the named-tunnel block above.
-  if ! curl -s --max-time 4 -o /dev/null "http://127.0.0.1:$WEBPORT/vnc.html"; then
-    log 'desktop web gone, restarting'
+  # Desktop: every layer his browser needs, not just the page. This block used to gate on one curl of
+  # /vnc.html, which a proxy answers happily with Xvnc gone -- so a box whose display had died kept
+  # reporting itself listening and never got repaired. The route to it is the tunnel's own and is checked
+  # by the named-tunnel block above.
+  BAD=$(DesktopBad)
+  if [ -n "$BAD" ]; then
+    log "desktop broken ($BAD), restarting"
     EnableDesktop; CHANGED=1
   fi
 
