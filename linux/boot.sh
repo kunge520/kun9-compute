@@ -446,8 +446,10 @@ MIME
 # a box with no reachable browser still reported itself healthy for two boots.
 BrowserOpen() {
   local d="$HOME/cf" i n b p
+  # Wait for the panel's own button files, not just for xfce4-session: the session is up well before the
+  # panel has written them, and patching nothing would leave the shipped lookup in place.
   for i in $(seq 1 20); do
-    pgrep -x xfce4-session >/dev/null && break
+    [ -n "$(sudo find /root/.config/xfce4/panel -name '*.desktop' 2>/dev/null | head -1)" ] && break
     sleep 1
   done
   # The panel keeps a private copy of its Web Browser button and writes it when the session starts, which
