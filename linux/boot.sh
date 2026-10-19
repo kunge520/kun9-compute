@@ -342,13 +342,13 @@ EnableDesktop() {
     for i in $(seq 1 15); do VncReady && break; sleep 1; done
   fi
   VncReady || { DESKG='no-xvnc'; return 1; }
-  # Xvnc makes /tmp/.X11-unix/X1 world-writable, and this image ships an unprivileged `runner` account, so
-  # anything running there could watch his screen and type as root. Connecting over a unix socket needs
-  # write on the inode, so 0700 closes it -- the dir stays 1777 because clients resolve the path through it,
-  # and nothing breaks: the desktop, kun9-browser and xset all reach the display as root, and websockify
-  # uses TCP 5901, not the socket. Re-applied per pass because a recreated display resets it.
+  # Xvnc makes /tmp/.X11-unix/X1 world-writable, and this image runs its job as an unprivileged `runner`
+  # account, so anything there could attach to :1 and read his screen or type as root. Connecting over a
+  # unix socket needs write on the inode, so 0700 closes it -- measured on the next boot: runner now gets
+  # EACCES while root's own xset/Xvnc still work. The directory stays 1777 so clients still resolve the
+  # path, and websockify is unaffected because it reaches the display over TCP 5901, not the socket.
+  # Re-applied on every pass because a recreated display resets it.
   sudo chmod 700 /tmp/.X11-unix/X1 2>/dev/null
-  sudo chmod 600 /root/.Xauthority 2>/dev/null
   # Before the session starts, so the menu already has the entry when the desktop first draws.
   BrowserLauncher
   # XDG_CONFIG_HOME must be pinned. The runner image exports it as /home/runner/.config and sudo keeps it,

@@ -267,15 +267,15 @@ export default {
         // The flag holds busy() across the bring-up and the machine's first /api/power poll clears it;
         // 1200 s is slack for a runner that dies during setup, not an expected wait.
         await env.STORE.put(m.bt, '1', { expirationTtl: 1200 });
-        // Re-measured on the live box 2026-10-19, dispatch -> first heartbeat: Linux publishes at +11 s but
-        // its desktop does not answer until +3m33s (stat of the first proxied WebSocket vs the job start),
-        // because XFCE/tigervnc/noVNC are installed by apt on every boot. Windows is up in about a minute.
-        // So the wait to promise differs per machine -- and 桌面 is the part that is slow, not 终端.
+        // Measured on the live box 2026-10-20: job start 19:56:05Z, first heartbeat +18 s, the display
+        // socket +67 s. Both machines are ready in about a minute -- the +3m33s I read here on 10-19 was
+        // the stat of the first proxied WebSocket, which is a click, not a readiness signal, and
+        // ubuntu-latest already ships XFCE/tigervnc/noVNC (binary dates 2024), so boot.sh's apt path
+        // normally does not run. The button is gated on rdp=listening anyway, so the copy only has to be
+        // roughly right and must not promise a minute count for a layer the box has not confirmed.
         return send(JSON.stringify({
           ok: true,
-          note: m === MACH.linux
-            ? '已触发：终端约 1 分钟能用，桌面约 3-4 分钟（Ubuntu 每次开机都要现装桌面），GitHub 繁忙时排队更久'
-            : '已触发，一般 1 分钟左右就绪，GitHub 繁忙时排队更久',
+          note: '已触发，一般 1~2 分钟就绪；Ubuntu 偶尔要现装桌面会多等几分钟，GitHub 繁忙时排队更久',
         }), 'application/json');
       }
       // A second 关机 within a minute is the same request, so remember what is already pending
@@ -694,7 +694,7 @@ function app() {
     "'GitHub 分配机器一般几秒，繁忙时才会排队'," +
     "'正在装 Git 和 cloudflared，装完才连得上隧道'," +
     "'隧道握手完成后，桌面和终端就都通了'," +
-    "'终端大约 1 分钟就通了；Ubuntu 的桌面每次开机现装，还要再等约 3 分钟'," +
+    "'终端和桌面一般 1~2 分钟就通了，Ubuntu 少数开机要现装桌面会多等几分钟'," +
     "'开机期间再按一次开机没有用，按钮会自己变灰'," +
     "'开机自动挂上 R2 网盘，写进盘里的文件不会随关机丢'," +
     "'桌面和终端都是浏览器直连，不用装任何客户端'," +
