@@ -1,1 +1,168 @@
-Ly8ga3VuOS1wYXN0ZS5qcyAtLSBnaXZlcyB0aGUgbm9WTkMgY2xpcGJvYXJkIHBhbmVsIGEgY2hhbm5lbCB0aGF0IGFjdHVhbGx5IGNhcnJpZXMgdGV4dC4KLy8gSW5zdGFsbGVkIGJ5IENsaXBQYW5lbCBpbiBsaW51eC9ib290LnNoIGludG8gYSBwcml2YXRlIGNvcHkgb2YgdGhlIG5vVk5DIHRyZWU7IHVwc3RyZWFtIGZpbGVzIGFyZQovLyBvdGhlcndpc2UgdW50b3VjaGVkLCBzbyBpZiB0aGlzIGZhaWxzIHRvIGxvYWQgdGhlIGRlc2t0b3Agc3RpbGwgZHJhd3MgZXhhY3RseSBhcyBiZWZvcmUuCi8vCi8vIFdoeSB0aGUgc3RvY2sgcGFuZWwgaXMgYnJva2VuLCBtZWFzdXJlZCBvbiB0aGUgbGl2ZSBib3g6Ci8vICAgKiBpdCBzZW5kcyBsZWdhY3kgQ3V0VGV4dCBidWlsdCB3aXRoIGBkYXRhW2ldID0gdGV4dC5jaGFyQ29kZUF0KGkpYCAtLSBvbmUgYnl0ZSBwZXIgY2hhcmFjdGVyLCBvdmVyCi8vICAgICBpdHMgb3duIGAvLyBGSVhNRTogdGV4dCBjYW4gaGF2ZSB2YWx1ZXMgb3V0c2lkZSBvZiBMYXRpbjEvVWludDhgIC0tIGFuZCBUaWdlclZOQyAxLjEzIGltcGxlbWVudHMKLy8gICAgIG5vIGV4dGVuZGVkIGNsaXBib2FyZCAoaXQgYW5zd2VycyBub3RoaW5nIHRvIFNldEVuY29kaW5ncyBvZiBwc2V1ZG8tZW5jb2RpbmcgLTIzOSksIHNvIENoaW5lc2UKLy8gICAgIGFycml2ZXMgcmUtZW5jb2RlZCBmcm9tIExhdGluLTEsIGkuZS4gbW9qaWJha2U7Ci8vICAgKiBpdCBoYXMgbm8gU2VuZCBidXR0b246IGB1aS5qczozMjdgIHdpcmVzIGBjaGFuZ2VgLCBzbyB0aGUgdGV4dCBvbmx5IGNyb3NzZXMgd2hlbiBoZSBjbGlja3MKLy8gICAgIG91dHNpZGUgdGhlIGJveDsKLy8gICAqIHRoZSBvbmUgcGF0aCB0aGF0IGRvZXMgY2FycnkgQ2hpbmVzZSBpcyBrZXlzeW1zIChYdm5jIG1hcHMgMHgwMTAwMDAwMCtjb2RlcG9pbnQgb24gdGhlIGZseSksIGJ1dAovLyAgICAgdGhlIGZpZWxkIGZlZWRpbmcgaXQsIGAjbm9WTkNfa2V5Ym9hcmRpbnB1dGAsIGlzIGEgMXgxcHggb2ZmLXNjcmVlbiB0ZXh0YXJlYSBhbmQgaXRzIEtleWJvYXJkIGlzCi8vICAgICBidWlsdCBpbiBhZGRUb3VjaFNwZWNpZmljSGFuZGxlcnMoKSAtLSBvbiBhIGRlc2t0b3AgYnJvd3NlciBpdCBpcyBuZWl0aGVyIHZpc2libGUgbm9yIHdpcmVkLAovLyAgICAgYmVjYXVzZSB0aGUgcmVhbCBrZXlib2FyZCBpcyBgbmV3IEtleWJvYXJkKHRoaXMuX2NhbnZhcylgLgovLyBTbzogc3RvcCB0aGUgQ3V0VGV4dCBzZW5kLCBhbmQgbWFrZSB0aGUgcGFuZWwncyBidXR0b24gdHlwZSB0aGUgdGV4dCBpbnN0ZWFkLgpjb25zdCBVTklDT0RFX0tFWVNZTSA9IDB4MDEwMDAwMDA7CgpmdW5jdGlvbiBrZXlzeW1PZihjcCkgewogIGlmIChjcCA9PT0gMHgwYSkgcmV0dXJuIDB4ZmYwZDsgICAgICAgICAgICAgICAgICAgICAgICAvLyBSZXR1cm4KICBpZiAoY3AgPT09IDB4MDkpIHJldHVybiAweGZmMDk7ICAgICAgICAgICAgICAgICAgICAgICAgLy8gVGFiCiAgcmV0dXJuIGNwIDw9IDB4ZmYgPyBjcCA6IFVOSUNPREVfS0VZU1lNICsgY3A7Cn0KCi8vIFJGQiBLZXlFdmVudDogWzQsIGRvd24sIDAsIDAsIGtleXN5bSBiaWctZW5kaWFuIHUzMl0gLS0gOCBieXRlcy4KZnVuY3Rpb24ga2V5RnJhbWUoa2V5c3ltLCBkb3duKSB7CiAgY29uc3QgZiA9IG5ldyBVaW50OEFycmF5KDgpOwogIGZbMF0gPSA0OwogIGZbMV0gPSBkb3duOwogIG5ldyBEYXRhVmlldyhmLmJ1ZmZlcikuc2V0VWludDMyKDQsIGtleXN5bSwgZmFsc2UpOwogIHJldHVybiBmOwp9CgpmdW5jdGlvbiBrZXlGcmFtZXModGV4dCkgewogIGNvbnN0IG91dCA9IFtdOwogIGZvciAoY29uc3QgY2ggb2YgdGV4dCkgewogICAgY29uc3QgY3AgPSBjaC5jb2RlUG9pbnRBdCgwKTsKICAgIGlmIChjcCA9PT0gMHgwZCkgY29udGludWU7ICAgICAgICAgICAgICAgICAgICAgICAgICAgLy8gdGhlIGRlc2t0b3AgdGFrZXMgTEYsIG5vdCBDUgogICAgY29uc3Qga2V5c3ltID0ga2V5c3ltT2YoY3ApOwogICAgb3V0LnB1c2goa2V5RnJhbWUoa2V5c3ltLCAxKSwga2V5RnJhbWUoa2V5c3ltLCAwKSk7CiAgfQogIHJldHVybiBvdXQ7Cn0KCmZ1bmN0aW9uIGNvbm5lY3QodXJsKSB7CiAgcmV0dXJuIG5ldyBQcm9taXNlKChyZXNvbHZlLCByZWplY3QpID0+IHsKICAgIGNvbnN0IHdzID0gbmV3IFdlYlNvY2tldCh1cmwpOwogICAgd3MuYmluYXJ5VHlwZSA9ICdhcnJheWJ1ZmZlcic7CiAgICBsZXQgYnVmID0gbmV3IFVpbnQ4QXJyYXkoMCk7CiAgICBsZXQgc3RhdGUgPSAnZ3JlZXRpbmcnOwogICAgY29uc3QgcmVhZDMyID0gKG8pID0+IG5ldyBEYXRhVmlldyhidWYuYnVmZmVyLCBidWYuYnl0ZU9mZnNldCwgYnVmLmxlbmd0aCkuZ2V0VWludDMyKG8sIGZhbHNlKTsKICAgIGNvbnN0IGZhaWwgPSAobXNnKSA9PiB7IHRyeSB7IHdzLmNsb3NlKCk7IH0gY2F0Y2ggKGUpIHt9IHJlamVjdChuZXcgRXJyb3IobXNnKSk7IH07CgogICAgd3Mub25vcGVuID0gKCkgPT4gd3Muc2VuZChuZXcgVGV4dEVuY29kZXIoKS5lbmNvZGUoJ1JGQiAwMDMuMDA4XG4nKSk7CiAgICB3cy5vbmVycm9yID0gKCkgPT4gZmFpbCgn6L+e5LiN5LiK5qGM6Z2iJyk7CiAgICAvLyBXaXRob3V0IHRoaXMgYSBzZXJ2ZXIgdGhhdCBoYW5ncyB1cCBtaWQtaGFuZHNoYWtlIGxlYXZlcyB0aGUgcHJvbWlzZSBwZW5kaW5nIGZvcmV2ZXIsIHdoaWNoIGlzCiAgICAvLyBleGFjdGx5IHdoYXQgYSAxMi1ieXRlIHZlcnNpb24gbGluZSBkaWQgdGhlIGZpcnN0IHRpbWUgdGhpcyB3YXMgdGVzdGVkLgogICAgd3Mub25jbG9zZSA9ICgpID0+IGZhaWwoJ+ahjOmdouaMguaWreS6hui/nuaOpScpOwogICAgd3Mub25tZXNzYWdlID0gKGV2KSA9PiB7CiAgICAgIGNvbnN0IGFkZCA9IG5ldyBVaW50OEFycmF5KGV2LmRhdGEpOwogICAgICBjb25zdCBqb2luZWQgPSBuZXcgVWludDhBcnJheShidWYubGVuZ3RoICsgYWRkLmxlbmd0aCk7CiAgICAgIGpvaW5lZC5zZXQoYnVmKTsKICAgICAgam9pbmVkLnNldChhZGQsIGJ1Zi5sZW5ndGgpOwogICAgICBidWYgPSBqb2luZWQ7CiAgICAgIGZvciAoOzspIHsKICAgICAgICBpZiAoc3RhdGUgPT09ICdncmVldGluZycpIHsKICAgICAgICAgIGlmIChidWYubGVuZ3RoIDwgMTIpIHJldHVybjsgICAgICAgICAgICAgICAgICAgLy8gIlJGQiAwMDMuMDA4XG4iCiAgICAgICAgICBidWYgPSBidWYuc3ViYXJyYXkoMTIpOwogICAgICAgICAgc3RhdGUgPSAndHlwZXMnOwogICAgICAgIH0gZWxzZSBpZiAoc3RhdGUgPT09ICd0eXBlcycpIHsKICAgICAgICAgIGlmIChidWYubGVuZ3RoIDwgMSkgcmV0dXJuOwogICAgICAgICAgY29uc3QgbiA9IGJ1ZlswXTsKICAgICAgICAgIGlmIChidWYubGVuZ3RoIDwgMSArIG4pIHJldHVybjsKICAgICAgICAgIGlmICghYnVmLnN1YmFycmF5KDEsIDEgKyBuKS5pbmNsdWRlcygxKSkgcmV0dXJuIGZhaWwoJ+ahjOmdouW8gOS6huWvhuegge+8jOi/meS4qumAmumBk+WPquaUr+aMgeWFjeiupOivgScpOwogICAgICAgICAgYnVmID0gYnVmLnN1YmFycmF5KDEgKyBuKTsKICAgICAgICAgIHdzLnNlbmQobmV3IFVpbnQ4QXJyYXkoWzFdKSk7ICAgICAgICAgICAgICAgICAgLy8gc2VjdXJpdHkgdHlwZTogTm9uZQogICAgICAgICAgc3RhdGUgPSAnYXV0aCc7CiAgICAgICAgfSBlbHNlIGlmIChzdGF0ZSA9PT0gJ2F1dGgnKSB7CiAgICAgICAgICBpZiAoYnVmLmxlbmd0aCA8IDQpIHJldHVybjsKICAgICAgICAgIGNvbnN0IGNvZGUgPSByZWFkMzIoMCk7CiAgICAgICAgICBidWYgPSBidWYuc3ViYXJyYXkoNCk7CiAgICAgICAgICBpZiAoY29kZSAhPT0gMCkgcmV0dXJuIGZhaWwoJ+iupOivgeiiq+aLkicpOwogICAgICAgICAgd3Muc2VuZChuZXcgVWludDhBcnJheShbMV0pKTsgICAgICAgICAgICAgICAgICAvLyBDbGllbnRJbml0OiBzaGFyZWQKICAgICAgICAgIHN0YXRlID0gJ3NlcnZlcmluaXQnOwogICAgICAgIH0gZWxzZSBpZiAoc3RhdGUgPT09ICdzZXJ2ZXJpbml0JykgewogICAgICAgICAgaWYgKGJ1Zi5sZW5ndGggPCAyNCkgcmV0dXJuOwogICAgICAgICAgY29uc3QgbmFtZUxlbiA9IHJlYWQzMigyMCk7CiAgICAgICAgICBpZiAoYnVmLmxlbmd0aCA8IDI0ICsgbmFtZUxlbikgcmV0dXJuOwogICAgICAgICAgYnVmID0gYnVmLnN1YmFycmF5KDI0ICsgbmFtZUxlbik7CiAgICAgICAgICBzdGF0ZSA9ICdyZWFkeSc7CiAgICAgICAgICByZXR1cm4gcmVzb2x2ZSh3cyk7CiAgICAgICAgfSBlbHNlIHsKICAgICAgICAgIHJldHVybjsgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgLy8gcmVhZHk6IHdoYXRldmVyIHRoZSBzZXJ2ZXIgc2VuZHMgaXMgcGl4ZWxzCiAgICAgICAgfQogICAgICB9CiAgICB9OwogIH0pOwp9CgovLyBGb3VyIGNoYXJhY3RlcnMgcGVyIGZyYW1lIHdpdGggYSBnYXA6IFh2bmMgYmluZHMgYSBzcGFyZSBrZXljb2RlIGFzIGl0IGhhbmRsZXMgZWFjaCB1bmtub3duIHVuaWNvZGUKLy8ga2V5c3ltLCBzbyB0aGUgZnJhbWVzIGhhdmUgdG8gYXJyaXZlIGluIHRoZSBvcmRlciB0aGUgbWFwcGluZ3MgYXJlIG1hZGUuCmV4cG9ydCBhc3luYyBmdW5jdGlvbiB0eXBlVGV4dCh0ZXh0LCB1cmwpIHsKICBjb25zdCB3cyA9IGF3YWl0IGNvbm5lY3QodXJsKTsKICBjb25zdCBmcmFtZXMgPSBrZXlGcmFtZXModGV4dCk7CiAgZm9yIChsZXQgaSA9IDA7IGkgPCBmcmFtZXMubGVuZ3RoOyBpICs9IDgpIHsKICAgIGNvbnN0IGxlbiA9IE1hdGgubWluKDgsIGZyYW1lcy5sZW5ndGggLSBpKTsKICAgIGNvbnN0IGJhdGNoID0gbmV3IFVpbnQ4QXJyYXkobGVuICogOCk7CiAgICBmb3IgKGxldCBrID0gMDsgayA8IGxlbjsgaysrKSBiYXRjaC5zZXQoZnJhbWVzW2kgKyBrXSwgayAqIDgpOwogICAgd3Muc2VuZChiYXRjaCk7CiAgICBpZiAoaSArIGxlbiA8IGZyYW1lcy5sZW5ndGgpIGF3YWl0IG5ldyBQcm9taXNlKChyKSA9PiBzZXRUaW1lb3V0KHIsIDIwKSk7CiAgfQogIGF3YWl0IG5ldyBQcm9taXNlKChyKSA9PiBzZXRUaW1lb3V0KHIsIDYwKSk7CiAgd3MuY2xvc2UoKTsKICByZXR1cm4gZnJhbWVzLmxlbmd0aCAvIDI7Cn0KCmlmICh0eXBlb2YgZG9jdW1lbnQgIT09ICd1bmRlZmluZWQnKSB7CiAgY29uc3QgcGFuZWwgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgnbm9WTkNfY2xpcGJvYXJkJyk7CiAgY29uc3QgdGEgPSBkb2N1bWVudC5nZXRFbGVtZW50QnlJZCgnbm9WTkNfY2xpcGJvYXJkX3RleHQnKTsKICBjb25zdCB3c3VybCA9IChsb2NhdGlvbi5wcm90b2NvbCA9PT0gJ2h0dHBzOicgPyAnd3NzOi8vJyA6ICd3czovLycpCiAgICArIGxvY2F0aW9uLmhvc3QgKyBuZXcgVVJMKCd3ZWJzb2NraWZ5JywgbG9jYXRpb24uaHJlZikucGF0aG5hbWU7CgogIGlmIChwYW5lbCAmJiB0YSkgewogICAgLy8gQ2FwdHVyZSBwaGFzZSwgc28gdGhlIHN0b2NrIGBjaGFuZ2VgIGxpc3RlbmVyIG9uIHRoZSB0ZXh0YXJlYSBuZXZlciBydW5zOiB0aGUgQ3V0VGV4dCBwYXRoIGlzCiAgICAvLyBnb25lLCBub3Qgc2hhZG93ZWQuIFJlY2VpdmluZyBmcm9tIHRoZSBkZXNrdG9wIHN0aWxsIGZpbGxzIHRoZSBib3ggKHRoYXQgaXMgYSB2YWx1ZSBhc3NpZ25tZW50KS4KICAgIHBhbmVsLmFkZEV2ZW50TGlzdGVuZXIoJ2NoYW5nZScsIChlKSA9PiB7CiAgICAgIGlmIChlLnRhcmdldCA9PT0gdGEpIHsgZS5zdG9wUHJvcGFnYXRpb24oKTsgZS5wcmV2ZW50RGVmYXVsdCgpOyB9CiAgICB9LCB0cnVlKTsKCiAgICB0YS5wbGFjZWhvbGRlciA9ICfmioropoHpgIHov5vmoYzpnaLnmoTmloflrZfotLTlnKjov5nph4zvvIjkuK3mloflj6/ku6XvvIknOwoKICAgIC8vIENocm9tZSBvZmZlcnMgInRyYW5zbGF0ZSB0aGlzIHBhZ2UiIG9uIG5vVk5DIGJlY2F1c2UgdGhlIHN0b2NrIFVJIGlzIEVuZ2xpc2gsIGFuZCBpdHMgZW5naW5lIHRoZW4KICAgIC8vIHJld3JpdGVzIG91ciBvd24gQ2hpbmVzZSAoIuW3sumAgeWFpSAxMCDkuKrlrZfnrKYiIGNhbWUgYmFjayBhcyAi6YCB5YWlIDEwIOS4quinkuiJsuW3siIpLiBPcHQgdGhlc2Ugbm9kZXMgb3V0LgogICAgY29uc3Qgbm9UcmFuc2xhdGUgPSAoZWwpID0+IHsgZWwuc2V0QXR0cmlidXRlKCd0cmFuc2xhdGUnLCAnbm8nKTsgcmV0dXJuIGVsOyB9OwogICAgY29uc3QgaGludCA9IG5vVHJhbnNsYXRlKGRvY3VtZW50LmNyZWF0ZUVsZW1lbnQoJ2RpdicpKTsKICAgIGhpbnQuc3R5bGUuY3NzVGV4dCA9ICdtYXJnaW4tdG9wOjZweDtjb2xvcjojYmJiO2ZvbnQtc2l6ZToxMnB4JzsKICAgIGhpbnQudGV4dENvbnRlbnQgPSAn5YWI5Zyo5qGM6Z2i6YeM5oqK5YWJ5qCH54K55Yiw6KaB6L6T5YWl55qE5L2N572u77yM5YaN5oyJ6YCB5YWl44CCJzsKICAgIGNvbnN0IHN0YXR1cyA9IG5vVHJhbnNsYXRlKGRvY3VtZW50LmNyZWF0ZUVsZW1lbnQoJ2RpdicpKTsKICAgIHN0YXR1cy5zdHlsZS5jc3NUZXh0ID0gJ21hcmdpbi10b3A6NHB4O2NvbG9yOiNiYmI7Zm9udC1zaXplOjEycHgnOwoKICAgIGNvbnN0IHNlbmQgPSBub1RyYW5zbGF0ZShkb2N1bWVudC5jcmVhdGVFbGVtZW50KCdpbnB1dCcpKTsKICAgIHNlbmQudHlwZSA9ICdidXR0b24nOwogICAgc2VuZC52YWx1ZSA9ICfpgIHlhaXmoYzpnaInOwogICAgc2VuZC5jbGFzc05hbWUgPSAnbm9WTkNfc3VibWl0JzsKICAgIHNlbmQuc3R5bGUuY3NzVGV4dCA9ICdtYXJnaW4tbGVmdDo4cHgnOwogICAgLy8gQW4gQVNDSUkgbWFya2VyLCBzbyBhIGhlYWx0aCBjaGVjayBvciBhIGhlYWRsZXNzIGR1bXAgY2FuIHByb3ZlIHRoaXMgYnJhbmNoIHJhbiB3aXRob3V0IGhhdmluZyB0bwogICAgLy8gY2FycnkgQ2hpbmVzZSB0aHJvdWdoIGEgY2hhbm5lbCB0aGF0IGVhdHMgbm9uLUFTQ0lJIGJ5dGVzLgogICAgc2VuZC5zZXRBdHRyaWJ1dGUoJ2RhdGEta3VuOScsICdwYXN0ZScpOwogICAgcGFuZWwuYXBwZW5kKHNlbmQsIHN0YXR1cywgaGludCk7CgogICAgY29uc3QgcnVuID0gYXN5bmMgKCkgPT4gewogICAgICBjb25zdCB0ZXh0ID0gdGEudmFsdWU7CiAgICAgIGlmICghdGV4dCkgeyBzdGF0dXMudGV4dENvbnRlbnQgPSAn5qGG6YeM6L+Y5rKh5pyJ5YaF5a65JzsgcmV0dXJuOyB9CiAgICAgIHN0YXR1cy50ZXh0Q29udGVudCA9ICfmraPlnKjpgIHlhaXigKYnOwogICAgICB0cnkgewogICAgICAgIGNvbnN0IG4gPSBhd2FpdCB0eXBlVGV4dCh0ZXh0LCB3c3VybCk7CiAgICAgICAgdGEudmFsdWUgPSAnJzsKICAgICAgICBzdGF0dXMudGV4dENvbnRlbnQgPSAn5bey6YCB5YWlICcgKyBuICsgJyDkuKrlrZfnrKYnOwogICAgICB9IGNhdGNoIChlcnIpIHsKICAgICAgICBzdGF0dXMudGV4dENvbnRlbnQgPSAn5aSx6LSl77yaJyArIGVyci5tZXNzYWdlOwogICAgICB9CiAgICB9OwogICAgc2VuZC5hZGRFdmVudExpc3RlbmVyKCdjbGljaycsIHJ1bik7CiAgICB0YS5hZGRFdmVudExpc3RlbmVyKCdrZXlkb3duJywgKGUpID0+IHsKICAgICAgaWYgKGUua2V5ID09PSAnRW50ZXInICYmIChlLmN0cmxLZXkgfHwgZS5tZXRhS2V5KSkgeyBlLnByZXZlbnREZWZhdWx0KCk7IHJ1bigpOyB9CiAgICB9KTsKICB9Cn0K
+// kun9-paste.js -- gives the noVNC clipboard panel a channel that actually carries text.
+// Installed by ClipPanel in linux/boot.sh into a private copy of the noVNC tree; upstream files are
+// otherwise untouched, so if this fails to load the desktop still draws exactly as before.
+//
+// Why the stock panel is broken, measured on the live box:
+//   * it sends legacy CutText built with `data[i] = text.charCodeAt(i)` -- one byte per character, over
+//     its own `// FIXME: text can have values outside of Latin1/Uint8` -- and TigerVNC 1.13 implements
+//     no extended clipboard (it answers nothing to SetEncodings of pseudo-encoding -239), so Chinese
+//     arrives re-encoded from Latin-1, i.e. mojibake;
+//   * it has no Send button: `ui.js:327` wires `change`, so the text only crosses when he clicks
+//     outside the box;
+//   * the one path that does carry Chinese is keysyms (Xvnc maps 0x01000000+codepoint on the fly), but
+//     the field feeding it, `#noVNC_keyboardinput`, is a 1x1px off-screen textarea and its Keyboard is
+//     built in addTouchSpecificHandlers() -- on a desktop browser it is neither visible nor wired,
+//     because the real keyboard is `new Keyboard(this._canvas)`.
+// So: stop the CutText send, and make the panel's button type the text instead.
+const UNICODE_KEYSYM = 0x01000000;
+
+function keysymOf(cp) {
+  if (cp === 0x0a) return 0xff0d;                        // Return
+  if (cp === 0x09) return 0xff09;                        // Tab
+  return cp <= 0xff ? cp : UNICODE_KEYSYM + cp;
+}
+
+// RFB KeyEvent: [4, down, 0, 0, keysym big-endian u32] -- 8 bytes.
+function keyFrame(keysym, down) {
+  const f = new Uint8Array(8);
+  f[0] = 4;
+  f[1] = down;
+  new DataView(f.buffer).setUint32(4, keysym, false);
+  return f;
+}
+
+function keyFrames(text) {
+  const out = [];
+  for (const ch of text) {
+    const cp = ch.codePointAt(0);
+    if (cp === 0x0d) continue;                           // the desktop takes LF, not CR
+    const keysym = keysymOf(cp);
+    out.push(keyFrame(keysym, 1), keyFrame(keysym, 0));
+  }
+  return out;
+}
+
+function connect(url) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
+    let buf = new Uint8Array(0);
+    let state = 'greeting';
+    const read32 = (o) => new DataView(buf.buffer, buf.byteOffset, buf.length).getUint32(o, false);
+    const fail = (msg) => { try { ws.close(); } catch (e) {} reject(new Error(msg)); };
+
+    ws.onopen = () => ws.send(new TextEncoder().encode('RFB 003.008\n'));
+    ws.onerror = () => fail('连不上桌面');
+    // Without this a server that hangs up mid-handshake leaves the promise pending forever, which is
+    // exactly what a 12-byte version line did the first time this was tested.
+    ws.onclose = () => fail('桌面挂断了连接');
+    ws.onmessage = (ev) => {
+      const add = new Uint8Array(ev.data);
+      const joined = new Uint8Array(buf.length + add.length);
+      joined.set(buf);
+      joined.set(add, buf.length);
+      buf = joined;
+      for (;;) {
+        if (state === 'greeting') {
+          if (buf.length < 12) return;                   // "RFB 003.008\n"
+          buf = buf.subarray(12);
+          state = 'types';
+        } else if (state === 'types') {
+          if (buf.length < 1) return;
+          const n = buf[0];
+          if (buf.length < 1 + n) return;
+          if (!buf.subarray(1, 1 + n).includes(1)) return fail('桌面开了密码，这个通道只支持免认证');
+          buf = buf.subarray(1 + n);
+          ws.send(new Uint8Array([1]));                  // security type: None
+          state = 'auth';
+        } else if (state === 'auth') {
+          if (buf.length < 4) return;
+          const code = read32(0);
+          buf = buf.subarray(4);
+          if (code !== 0) return fail('认证被拒');
+          ws.send(new Uint8Array([1]));                  // ClientInit: shared
+          state = 'serverinit';
+        } else if (state === 'serverinit') {
+          if (buf.length < 24) return;
+          const nameLen = read32(20);
+          if (buf.length < 24 + nameLen) return;
+          buf = buf.subarray(24 + nameLen);
+          state = 'ready';
+          return resolve(ws);
+        } else {
+          return;                                        // ready: whatever the server sends is pixels
+        }
+      }
+    };
+  });
+}
+
+// Four characters per frame with a gap: Xvnc binds a spare keycode as it handles each unknown unicode
+// keysym, so the frames have to arrive in the order the mappings are made.
+export async function typeText(text, url) {
+  const ws = await connect(url);
+  const frames = keyFrames(text);
+  for (let i = 0; i < frames.length; i += 8) {
+    const len = Math.min(8, frames.length - i);
+    const batch = new Uint8Array(len * 8);
+    for (let k = 0; k < len; k++) batch.set(frames[i + k], k * 8);
+    ws.send(batch);
+    if (i + len < frames.length) await new Promise((r) => setTimeout(r, 20));
+  }
+  await new Promise((r) => setTimeout(r, 60));
+  ws.close();
+  return frames.length / 2;
+}
+
+if (typeof document !== 'undefined') {
+  const panel = document.getElementById('noVNC_clipboard');
+  const ta = document.getElementById('noVNC_clipboard_text');
+  const wsurl = (location.protocol === 'https:' ? 'wss://' : 'ws://')
+    + location.host + new URL('websockify', location.href).pathname;
+
+  if (panel && ta) {
+    // Capture phase, so the stock `change` listener on the textarea never runs: the CutText path is
+    // gone, not shadowed. Receiving from the desktop still fills the box (that is a value assignment).
+    panel.addEventListener('change', (e) => {
+      if (e.target === ta) { e.stopPropagation(); e.preventDefault(); }
+    }, true);
+
+    ta.placeholder = '把要送进桌面的文字贴在这里（中文可以）';
+
+    // Chrome offers "translate this page" on noVNC because the stock UI is English, and its engine then
+    // rewrites our own Chinese ("已送入 10 个字符" came back as "送入 10 个角色已"). Opt these nodes out.
+    const noTranslate = (el) => { el.setAttribute('translate', 'no'); return el; };
+    const hint = noTranslate(document.createElement('div'));
+    hint.style.cssText = 'margin-top:6px;color:#bbb;font-size:12px';
+    hint.textContent = '先在桌面里把光标点到要输入的位置，再按送入。';
+    const status = noTranslate(document.createElement('div'));
+    status.style.cssText = 'margin-top:4px;color:#bbb;font-size:12px';
+
+    const send = noTranslate(document.createElement('input'));
+    send.type = 'button';
+    send.value = '送入桌面';
+    send.className = 'noVNC_submit';
+    send.style.cssText = 'margin-left:8px';
+    // An ASCII marker, so a health check or a headless dump can prove this branch ran without having to
+    // carry Chinese through a channel that eats non-ASCII bytes.
+    send.setAttribute('data-kun9', 'paste');
+    panel.append(send, status, hint);
+
+    const run = async () => {
+      const text = ta.value;
+      if (!text) { status.textContent = '框里还没有内容'; return; }
+      status.textContent = '正在送入…';
+      try {
+        const n = await typeText(text, wsurl);
+        ta.value = '';
+        status.textContent = '已送入 ' + n + ' 个字符';
+      } catch (err) {
+        status.textContent = '失败：' + err.message;
+      }
+    };
+    send.addEventListener('click', run);
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); }
+    });
+  }
+}
