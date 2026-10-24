@@ -97,17 +97,20 @@ function connect(url) {
   });
 }
 
-// Four characters per frame with a gap: Xvnc binds a spare keycode as it handles each unknown unicode
-// keysym, so the frames have to arrive in the order the mappings are made.
+// One character per write (its down and up travel together, so no other key can slip between them), with
+// a gap: Xvnc binds a spare keycode as it handles each unknown unicode keysym, and two allocations inside
+// one read pass can land on the same keycode -- measured on a fresh display, where 第 and 二 were both
+// added to 248 and the first character came out as the second one. A character per write means at most
+// one allocation per pass, which costs ~30 ms per character.
 export async function typeText(text, url) {
   const ws = await connect(url);
   const frames = keyFrames(text);
-  for (let i = 0; i < frames.length; i += 8) {
-    const len = Math.min(8, frames.length - i);
-    const batch = new Uint8Array(len * 8);
-    for (let k = 0; k < len; k++) batch.set(frames[i + k], k * 8);
+  for (let i = 0; i < frames.length; i += 2) {
+    const batch = new Uint8Array(16);
+    batch.set(frames[i], 0);
+    batch.set(frames[i + 1], 8);
     ws.send(batch);
-    if (i + len < frames.length) await new Promise((r) => setTimeout(r, 20));
+    if (i + 2 < frames.length) await new Promise((r) => setTimeout(r, 30));
   }
   await new Promise((r) => setTimeout(r, 60));
   ws.close();
