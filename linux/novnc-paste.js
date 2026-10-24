@@ -16,6 +16,8 @@
 // So: stop the CutText send, and make the panel's button type the text instead.
 const UNICODE_KEYSYM = 0x01000000;
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 function keysymOf(cp) {
   if (cp === 0x0a) return 0xff0d;                        // Return
   if (cp === 0x09) return 0xff09;                        // Tab
@@ -105,16 +107,26 @@ function connect(url) {
 export async function typeText(text, url) {
   const ws = await connect(url);
   const frames = keyFrames(text);
+  const chars = frames.length / 2;
+  let sent = 0;
   for (let i = 0; i < frames.length; i += 2) {
+    if (ws.readyState !== WebSocket.OPEN) break;                   // hung up mid-paste: say so, do not claim it
     const batch = new Uint8Array(16);
     batch.set(frames[i], 0);
     batch.set(frames[i + 1], 8);
     ws.send(batch);
-    if (i + 2 < frames.length) await new Promise((r) => setTimeout(r, 30));
+    sent++;
+    if (i + 2 < frames.length) await sleep(30);
   }
-  await new Promise((r) => setTimeout(r, 60));
+  // Hang up only once the tunnel has taken the last frames. A 45-character paste measured on the live
+  // box delivered 35 and reported success: close() while writes are still queued drops the tail, and
+  // the extra pause lets Xvnc read what arrived before websockify tears the socket down.
+  const deadline = Date.now() + 3000;
+  while (ws.bufferedAmount > 0 && Date.now() < deadline) await sleep(50);
+  await sleep(250);
   ws.close();
-  return frames.length / 2;
+  if (sent !== chars) throw new Error('桌面中途断了连接，只送入 ' + sent + ' 个字符，重来一遍');
+  return sent;
 }
 
 if (typeof document !== 'undefined') {
