@@ -413,7 +413,11 @@ EnableDesktop() {
 # and xclip hands it to the desktop; a failed install must not make the desktop itself look broken, so this
 # only ever logs.
 ClipBridge() {
-  local d="$HOME/cf" w="$d/kun9-clip"
+  local d="$HOME/cf" w
+  # Two statements, not one: bash expands the words of a single `local` before it assigns any of them, so
+  # the one-line form made w point at /kun9-clip and the helper was never written. BrowserLauncher says
+  # the same thing -- this is the second time this exact line shape has bitten.
+  local w="$d/kun9-clip"
   mkdir -p "$d"
   cat >"$w" <<'CLIP'
 #!/bin/sh
@@ -449,7 +453,8 @@ CLIP
         sudo timeout 300 apt-get install -y -qq xclip >/dev/null 2>&1; }
   fi
   if command -v xclip >/dev/null 2>&1; then
-    sudo install -m 755 "$w" /usr/local/bin/kun9-clip && log "kun9-clip ready"
+    sudo install -m 755 "$w" /usr/local/bin/kun9-clip && log "kun9-clip ready" ||
+      log "kun9-clip 没装上：$w 写不出来或 sudo 不可用"
   else
     log "kun9-clip installed but xclip is missing; it will report the install command"
   fi
